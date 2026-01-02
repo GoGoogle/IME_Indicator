@@ -1,0 +1,6 @@
+输入指示器 (IME Indicator)
+
+轻量级中英输入法状态实时提示工具。
+
+GitHub: https://github.com/HaujetZhao/IME_Indicator
+作者：Antigravity & Haujet
