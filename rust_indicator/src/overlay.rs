@@ -1,6 +1,6 @@
-use std::ptr::null_mut;
+use std::ptr::{null_mut, null};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, UpdateLayeredWindow, ULW_ALPHA, BLENDFUNCTION, AC_SRC_OVER, AC_SRC_ALPHA
@@ -30,17 +30,29 @@ pub struct IndicatorOverlay {
 }
 
 impl IndicatorOverlay {
-    pub fn new(name: &str, size: i32, color_cn: u32, color_en: u32, color_caps: u32, offset_x: i32, offset_y: i32) -> Self {
+    pub fn new(_name: &str, size: i32, color_cn: u32, color_en: u32, color_caps: u32, offset_x: i32, offset_y: i32) -> Self {
         let mut token = 0;
         let input = GdiplusStartupInput { GdiplusVersion: 1, ..Default::default() };
-        unsafe { let _ = GdiplusStartup(&mut token, &input, None); }
+        unsafe { let _ = GdiplusStartup(&mut token, &input, null_mut()); }
+
         let hwnd = unsafe {
             let h_inst = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
-            let cls_name: Vec<u16> = "IndicatorOverlayClass".encode_utf16().chain(Some(0)).collect();
-            let wc = WNDCLASSEXW { cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(DefWindowProcW), hInstance: h_inst.into(), lpszClassName: PCWSTR(cls_name.as_ptr()), ..Default::default() };
+            let cls_name: Vec<u16> = "IndicatorOverlayClass\0".encode_utf16().collect();
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(DefWindowProcW),
+                hInstance: h_inst.into(),
+                lpszClassName: PCWSTR(cls_name.as_ptr()),
+                ..Default::default()
+            };
             RegisterClassExW(&wc);
-            CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, PCWSTR(cls_name.as_ptr()), PCWSTR(null_mut()), WS_POPUP, 0, 0, size, size, None, None, h_inst, None)
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                PCWSTR(cls_name.as_ptr()), PCWSTR(null()), WS_POPUP,
+                0, 0, size, size, None, None, h_inst, None
+            ).expect("Failed to create window")
         };
+
         Self { hwnd, size, color_cn, color_en, color_caps, offset_x, offset_y, gdi_token: token }
     }
 
@@ -53,6 +65,7 @@ impl IndicatorOverlay {
             let mut bits = null_mut();
             let h_bmp = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
             let old_bmp = SelectObject(mem_dc, h_bmp);
+            
             let mut g = null_mut();
             GdipCreateFromHDC(mem_dc, &mut g);
             GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
@@ -61,14 +74,17 @@ impl IndicatorOverlay {
             GdipFillEllipse(g, b as *mut GpBrush, 0.0, 0.0, self.size as f32, self.size as f32);
             GdipDeleteBrush(b as *mut GpBrush);
             GdipDeleteGraphics(g);
+
             let dest = POINT { x: x + self.offset_x - self.size/2, y: y + caret_h + self.offset_y - self.size/2 };
             let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-            UpdateLayeredWindow(self.hwnd, screen_dc, Some(&dest), Some(&SIZE { cx: self.size, cy: self.size }), mem_dc, Some(&POINT::default()), COLORREF(0), Some(&blend), ULW_ALPHA);
+            let _ = UpdateLayeredWindow(self.hwnd, screen_dc, Some(&dest), Some(&SIZE { cx: self.size, cy: self.size }), mem_dc, Some(&POINT::default()), COLORREF(0), Some(&blend), ULW_ALPHA);
+            
             SelectObject(mem_dc, old_bmp);
-            DeleteObject(h_bmp);
-            DeleteDC(mem_dc);
+            let _ = DeleteObject(h_bmp);
+            let _ = DeleteDC(mem_dc);
             ReleaseDC(None, screen_dc);
-            let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.hwnd, HW_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, self.hwnd, 0, 0, PM_REMOVE).into() { TranslateMessage(&msg); DispatchMessageW(&msg); }
         }
