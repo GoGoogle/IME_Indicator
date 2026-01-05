@@ -1,0 +1,46 @@
+name: Rust Build and Release
+
+on:
+  push:
+    # 只要推送以 v 开头的标签（如 v1.0.0），就会触发发布逻辑
+    tags:
+      - 'v*' 
+  workflow_dispatch: # 保留手动触发按钮
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    # 设置权限，允许 Action 创建 Release
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Rust Cache
+      uses: swatinem/rust-cache@v2
+      with:
+        workspaces: "rust_indicator -> target"
+
+    - name: Build Release
+      working-directory: ./rust_indicator
+      run: cargo build --release --verbose
+
+    # 自动发布到 Releases
+    - name: Create Release and Upload EXE
+      uses: softprops/action-gh-release@v2
+      with:
+        # 发布的标题，使用你的 Tag 名
+        name: Release ${{ github.ref_name }}
+        # 发布的描述
+        body: "自动构建的 IME-Indicator 编译版本。"
+        # 要上传的文件路径（根据你的项目名确认 exe 名称）
+        files: |
+          ./rust_indicator/target/release/IME-Indicator.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
