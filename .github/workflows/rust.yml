@@ -1,0 +1,31 @@
+name: Rust Build EXE
+
+on:
+  push:
+    branches: [ "main" ]  # 当你推送到 main 分支时触发
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:      # 允许你手动点击按钮运行
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest  # 使用 Windows 虚拟机环境
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build
+      run: cargo build --release --verbose
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ime-indicator-exe
+        path: target/release/*.exe  # 自动找到编译好的 exe 文件
