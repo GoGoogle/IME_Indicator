@@ -1,21 +1,12 @@
-//! 输入指示器 - 零依赖 TOML 解析
-//! 追求极致代码简洁度与二进制体积
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-// ============================================================================
-// 数据结构
-// ============================================================================
-
 pub struct Config {
     pub poll_state_interval_ms: u64,
     pub poll_track_interval_ms: u64,
-
     pub tray_enable: bool,
-
     pub caret_enable: bool,
     pub caret_color_cn: u32,
     pub caret_color_en: u32,
@@ -23,7 +14,6 @@ pub struct Config {
     pub caret_offset_x: i32,
     pub caret_offset_y: i32,
     pub caret_show_en: bool,
-
     pub mouse_enable: bool,
     pub mouse_color_cn: u32,
     pub mouse_color_en: u32,
@@ -32,11 +22,8 @@ pub struct Config {
     pub mouse_offset_y: i32,
     pub mouse_show_en: bool,
     pub mouse_target_cursors: Vec<u32>,
-
-    // --- CAPS_INDICATOR_START ---
     pub caps_enable: bool,
     pub caps_color: u32,
-    // --- CAPS_INDICATOR_END ---
 }
 
 impl Default for Config {
@@ -60,10 +47,8 @@ impl Default for Config {
             mouse_offset_y: 18,
             mouse_show_en: true,
             mouse_target_cursors: vec![32513, 32512],
-            // --- CAPS_INDICATOR_START ---
             caps_enable: true,
-            caps_color: parse_color("#00FF00A0"), // 默认绿色
-            // --- CAPS_INDICATOR_END ---
+            caps_color: parse_color("#00FF00A0"),
         }
     }
 }
@@ -76,42 +61,30 @@ pub fn parse_color(s: &str) -> u32 {
         let b = u32::from_str_radix(&clean[4..6], 16).unwrap_or(0);
         let a = if clean.len() == 8 { u32::from_str_radix(&clean[6..8], 16).unwrap_or(0xA0) } else { 0xA0 };
         (a << 24) | (r << 16) | (g << 8) | b
-    } else {
-        0xA0FF7800
-    }
+    } else { 0xA0FF7800 }
 }
 
 fn load_config() -> Config {
     let mut config = Config::default();
     let path = get_config_path();
-
-    if !path.exists() {
-        let _ = fs::write(&path, generate_toml_template());
-        return config;
-    }
-
+    if !path.exists() { let _ = fs::write(&path, generate_toml_template()); return config; }
     if let Ok(content) = fs::read_to_string(&path) {
         let mut sections = HashMap::new();
         let mut cur_sec = String::new();
-
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') { continue; }
-            if line.starts_with('[') && line.ends_with(']') {
-                cur_sec = line[1..line.len()-1].to_lowercase();
-            } else if let Some((k, v)) = line.split_once('=') {
+            if line.starts_with('[') && line.ends_with(']') { cur_sec = line[1..line.len()-1].to_lowercase(); }
+            else if let Some((k, v)) = line.split_once('=') {
                 let key = k.trim().to_lowercase();
                 let val = v.split(" #").next().unwrap().trim().to_string();
                 sections.entry(cur_sec.clone()).or_insert_with(HashMap::new).insert(key, val);
             }
         }
-
         let get = |sec: &str, key: &str| sections.get(sec)?.get(key);
-        
         if let Some(v) = get("poll", "state_interval_ms") { if let Ok(n) = v.parse() { config.poll_state_interval_ms = n; } }
         if let Some(v) = get("poll", "track_interval_ms") { if let Ok(n) = v.parse() { config.poll_track_interval_ms = n; } }
         if let Some(v) = get("tray", "enable") { config.tray_enable = v == "true"; }
-        
         if let Some(v) = get("caret", "enable") { config.caret_enable = v == "true"; }
         if let Some(v) = get("caret", "color_cn") { config.caret_color_cn = parse_color(v); }
         if let Some(v) = get("caret", "color_en") { config.caret_color_en = parse_color(v); }
@@ -119,7 +92,6 @@ fn load_config() -> Config {
         if let Some(v) = get("caret", "offset_x") { if let Ok(n) = v.parse() { config.caret_offset_x = n; } }
         if let Some(v) = get("caret", "offset_y") { if let Ok(n) = v.parse() { config.caret_offset_y = n; } }
         if let Some(v) = get("caret", "show_en") { config.caret_show_en = v == "true"; }
-
         if let Some(v) = get("mouse", "enable") { config.mouse_enable = v == "true"; }
         if let Some(v) = get("mouse", "color_cn") { config.mouse_color_cn = parse_color(v); }
         if let Some(v) = get("mouse", "color_en") { config.mouse_color_en = parse_color(v); }
@@ -131,28 +103,20 @@ fn load_config() -> Config {
             config.mouse_target_cursors = v.trim_matches(|c| c == '[' || c == ']')
                 .split(',').filter_map(|s| s.trim().parse().ok()).collect();
         }
-
-        // --- CAPS_INDICATOR_START ---
         if let Some(v) = get("caps", "enable") { config.caps_enable = v == "true"; }
         if let Some(v) = get("caps", "color") { config.caps_color = parse_color(v); }
-        // --- CAPS_INDICATOR_END ---
     }
     config
 }
 
-pub fn get_config_path() -> PathBuf {
-    std::env::current_exe().unwrap().parent().unwrap().join("config.toml")
-}
+pub fn get_config_path() -> PathBuf { std::env::current_exe().unwrap().parent().unwrap().join("config.toml") }
 
 fn generate_toml_template() -> String {
-    r##"# 输入指示器 配置文件
-[poll]
+    r##"[poll]
 state_interval_ms = 100
 track_interval_ms = 10
-
 [tray]
 enable = true
-
 [caret]
 enable = true
 color_cn = "#FF7800A0"
@@ -161,7 +125,6 @@ size = 8
 offset_x = 0
 offset_y = 0
 show_en = true
-
 [mouse]
 enable = true
 color_cn = "#FF7800A0"
@@ -171,16 +134,14 @@ offset_x = 2
 offset_y = 18
 show_en = true
 target_cursors = [32513, 32512]
-
 [caps]
 enable = true
-color = "#00FF00A0" # 大写锁定时的指示颜色（绿色）
+color = "#00FF00A0"
 "##.to_string()
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 pub fn get() -> &'static Config { CONFIG.get_or_init(load_config) }
-
 pub fn state_poll_interval_ms() -> u64 { get().poll_state_interval_ms }
 pub fn track_poll_interval_ms() -> u64 { get().poll_track_interval_ms }
 pub fn tray_enable() -> bool { get().tray_enable }
@@ -199,8 +160,5 @@ pub fn mouse_offset_x() -> i32 { get().mouse_offset_x }
 pub fn mouse_offset_y() -> i32 { get().mouse_offset_y }
 pub fn mouse_show_en() -> bool { get().mouse_show_en }
 pub fn mouse_target_cursors() -> &'static [u32] { &get().mouse_target_cursors }
-
-// --- CAPS_INDICATOR_START ---
 pub fn caps_enable() -> bool { get().caps_enable }
 pub fn caps_color() -> u32 { get().caps_color }
-// --- CAPS_INDICATOR_END ---
