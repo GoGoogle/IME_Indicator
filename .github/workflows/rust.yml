@@ -15,15 +15,22 @@ jobs:
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Rust Cache
+      uses: swatinem/rust-cache@v2
+      with:
+        workspaces: "rust_indicator -> target"
 
     - name: Build
-      # 指定在子目录中运行
       working-directory: ./rust_indicator
-      run: cargo build --release --verbose
+      # 重点：在命令行强制开启 feature，防止 Cargo.toml 解析异常
+      run: |
+        cargo build --release --verbose --features "windows/Win32_UI_Input_KeyboardAndMouse windows/Win32_UI_WindowsAndMessaging windows/Win32_Graphics_Gdi windows/Win32_Graphics_GdiPlus"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ime-indicator-exe
-        # 路径也要指向子目录生成的 exe
         path: ./rust_indicator/target/release/*.exe
