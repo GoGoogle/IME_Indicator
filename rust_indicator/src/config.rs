@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 // ============================================================================
-// 数据结构 (扁平化，删除冗余嵌套)
+// 数据结构
 // ============================================================================
 
 pub struct Config {
@@ -32,6 +32,11 @@ pub struct Config {
     pub mouse_offset_y: i32,
     pub mouse_show_en: bool,
     pub mouse_target_cursors: Vec<u32>,
+
+    // --- CAPS_INDICATOR_START ---
+    pub caps_enable: bool,
+    pub caps_color: u32,
+    // --- CAPS_INDICATOR_END ---
 }
 
 impl Default for Config {
@@ -55,38 +60,26 @@ impl Default for Config {
             mouse_offset_y: 18,
             mouse_show_en: true,
             mouse_target_cursors: vec![32513, 32512],
+            // --- CAPS_INDICATOR_START ---
+            caps_enable: true,
+            caps_color: parse_color("#00FF00A0"), // 默认绿色
+            // --- CAPS_INDICATOR_END ---
         }
     }
 }
 
-// ============================================================================
-// 颜色与解析辅助
-// ============================================================================
-
-pub trait ConfigParseExt {
-    fn parse_color(&self) -> u32;
-}
-
-impl ConfigParseExt for str {
-    fn parse_color(&self) -> u32 {
-        let clean = self.trim().trim_matches('"').trim_start_matches('#');
-        if clean.len() >= 6 {
-            let r = u32::from_str_radix(&clean[0..2], 16).unwrap_or(0);
-            let g = u32::from_str_radix(&clean[2..4], 16).unwrap_or(0);
-            let b = u32::from_str_radix(&clean[4..6], 16).unwrap_or(0);
-            let a = if clean.len() == 8 { u32::from_str_radix(&clean[6..8], 16).unwrap_or(0xA0) } else { 0xA0 };
-            (a << 24) | (r << 16) | (g << 8) | b
-        } else {
-            0xA0FF7800
-        }
+pub fn parse_color(s: &str) -> u32 {
+    let clean = s.trim().trim_matches('"').trim_start_matches('#');
+    if clean.len() >= 6 {
+        let r = u32::from_str_radix(&clean[0..2], 16).unwrap_or(0);
+        let g = u32::from_str_radix(&clean[2..4], 16).unwrap_or(0);
+        let b = u32::from_str_radix(&clean[4..6], 16).unwrap_or(0);
+        let a = if clean.len() == 8 { u32::from_str_radix(&clean[6..8], 16).unwrap_or(0xA0) } else { 0xA0 };
+        (a << 24) | (r << 16) | (g << 8) | b
+    } else {
+        0xA0FF7800
     }
 }
-
-pub fn parse_color(s: &str) -> u32 { s.parse_color() }
-
-// ============================================================================
-// 微型 TOML 解析器
-// ============================================================================
 
 fn load_config() -> Config {
     let mut config = Config::default();
@@ -104,115 +97,86 @@ fn load_config() -> Config {
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') { continue; }
-            
             if line.starts_with('[') && line.ends_with(']') {
                 cur_sec = line[1..line.len()-1].to_lowercase();
             } else if let Some((k, v)) = line.split_once('=') {
                 let key = k.trim().to_lowercase();
-                // 智能移除行内注释：寻找 " #" (带空格的井号) 
                 let val = v.split(" #").next().unwrap().trim().to_string();
                 sections.entry(cur_sec.clone()).or_insert_with(HashMap::new).insert(key, val);
             }
         }
 
-        // 映射数据 (精简写法)
         let get = |sec: &str, key: &str| sections.get(sec)?.get(key);
         
-        if let Some(v) = get("poll",  "state_interval_ms") { if let Ok(n) = v.parse() { config.poll_state_interval_ms = n; } }
-        if let Some(v) = get("poll",  "track_interval_ms") { if let Ok(n) = v.parse() { config.poll_track_interval_ms = n; } }
+        if let Some(v) = get("poll", "state_interval_ms") { if let Ok(n) = v.parse() { config.poll_state_interval_ms = n; } }
+        if let Some(v) = get("poll", "track_interval_ms") { if let Ok(n) = v.parse() { config.poll_track_interval_ms = n; } }
+        if let Some(v) = get("tray", "enable") { config.tray_enable = v == "true"; }
         
-        if let Some(v) = get("tray", "enable") { 
-            match v.as_str() {
-                "true" => config.tray_enable = true,
-                "false" => config.tray_enable = false,
-                _ => {} // 保持默认值
-            }
-        }
-        
-        if let Some(v) = get("caret", "enable") { 
-            match v.as_str() {
-                "true" => config.caret_enable = true,
-                "false" => config.caret_enable = false,
-                _ => {}
-            }
-        }
-        if let Some(v) = get("caret", "color_cn") { config.caret_color_cn = v.parse_color(); }
-        if let Some(v) = get("caret", "color_en") { config.caret_color_en = v.parse_color(); }
-        if let Some(v) = get("caret", "size")     { if let Ok(n) = v.parse() { config.caret_size = n; } }
+        if let Some(v) = get("caret", "enable") { config.caret_enable = v == "true"; }
+        if let Some(v) = get("caret", "color_cn") { config.caret_color_cn = parse_color(v); }
+        if let Some(v) = get("caret", "color_en") { config.caret_color_en = parse_color(v); }
+        if let Some(v) = get("caret", "size") { if let Ok(n) = v.parse() { config.caret_size = n; } }
         if let Some(v) = get("caret", "offset_x") { if let Ok(n) = v.parse() { config.caret_offset_x = n; } }
         if let Some(v) = get("caret", "offset_y") { if let Ok(n) = v.parse() { config.caret_offset_y = n; } }
-        if let Some(v) = get("caret", "show_en") { 
-            match v.as_str() {
-                "true" => config.caret_show_en = true,
-                "false" => config.caret_show_en = false,
-                _ => {}
-            }
-        }
+        if let Some(v) = get("caret", "show_en") { config.caret_show_en = v == "true"; }
 
-        if let Some(v) = get("mouse", "enable") { 
-            match v.as_str() {
-                "true" => config.mouse_enable = true,
-                "false" => config.mouse_enable = false,
-                _ => {}
-            }
-        }
-        if let Some(v) = get("mouse", "color_cn") { config.mouse_color_cn = v.parse_color(); }
-        if let Some(v) = get("mouse", "color_en") { config.mouse_color_en = v.parse_color(); }
-        if let Some(v) = get("mouse", "size")     { if let Ok(n) = v.parse() { config.mouse_size = n; } }
+        if let Some(v) = get("mouse", "enable") { config.mouse_enable = v == "true"; }
+        if let Some(v) = get("mouse", "color_cn") { config.mouse_color_cn = parse_color(v); }
+        if let Some(v) = get("mouse", "color_en") { config.mouse_color_en = parse_color(v); }
+        if let Some(v) = get("mouse", "size") { if let Ok(n) = v.parse() { config.mouse_size = n; } }
         if let Some(v) = get("mouse", "offset_x") { if let Ok(n) = v.parse() { config.mouse_offset_x = n; } }
         if let Some(v) = get("mouse", "offset_y") { if let Ok(n) = v.parse() { config.mouse_offset_y = n; } }
-        if let Some(v) = get("mouse", "show_en") { 
-            match v.as_str() {
-                "true" => config.mouse_show_en = true,
-                "false" => config.mouse_show_en = false,
-                _ => {}
-            }
-        }
+        if let Some(v) = get("mouse", "show_en") { config.mouse_show_en = v == "true"; }
         if let Some(v) = get("mouse", "target_cursors") {
             config.mouse_target_cursors = v.trim_matches(|c| c == '[' || c == ']')
                 .split(',').filter_map(|s| s.trim().parse().ok()).collect();
         }
+
+        // --- CAPS_INDICATOR_START ---
+        if let Some(v) = get("caps", "enable") { config.caps_enable = v == "true"; }
+        if let Some(v) = get("caps", "color") { config.caps_color = parse_color(v); }
+        // --- CAPS_INDICATOR_END ---
     }
     config
 }
 
-pub(crate) fn get_config_path() -> PathBuf {
+pub fn get_config_path() -> PathBuf {
     std::env::current_exe().unwrap().parent().unwrap().join("config.toml")
 }
 
 fn generate_toml_template() -> String {
-    r##"# 输入指示器 (IME Indicator) 配置文件
+    r##"# 输入指示器 配置文件
 [poll]
-state_interval_ms = 100   # 状态检测间隔 (ms)
-track_interval_ms = 10    # 位置追踪间隔 (ms)
+state_interval_ms = 100
+track_interval_ms = 10
 
 [tray]
-enable = true               # 是否显示托盘图标 (false 时完全后台运行，只能通过任务管理器结束)
+enable = true
 
 [caret]
-enable = true               # 是否启用文本光标提示
-color_cn = "#FF7800A0"    # 中文状态颜色 (#RRGGBBAA)
-color_en = "#0078FF30"    # 英文状态颜色
-size = 8                    # 提示球大小
+enable = true
+color_cn = "#FF7800A0"
+color_en = "#0078FF30"
+size = 8
 offset_x = 0
 offset_y = 0
-show_en = true              # 英文状态下是否显示
+show_en = true
 
 [mouse]
-enable = true               # 是否开启鼠标提示
-color_cn = "#FF7800A0"    # 中文状态颜色
-color_en = "#0078FF30"    # 英文状态颜色
-size = 8                    # 提示球大小
+enable = true
+color_cn = "#FF7800A0"
+color_en = "#0078FF30"
+size = 8
 offset_x = 2
 offset_y = 18
-show_en = true              # 英文状态下是否显示
-target_cursors = [32513, 32512]  # I-Beam, Normal
+show_en = true
+target_cursors = [32513, 32512]
+
+[caps]
+enable = true
+color = "#00FF00A0" # 大写锁定时的指示颜色（绿色）
 "##.to_string()
 }
-
-// ============================================================================
-// 全局接口
-// ============================================================================
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 pub fn get() -> &'static Config { CONFIG.get_or_init(load_config) }
@@ -235,3 +199,8 @@ pub fn mouse_offset_x() -> i32 { get().mouse_offset_x }
 pub fn mouse_offset_y() -> i32 { get().mouse_offset_y }
 pub fn mouse_show_en() -> bool { get().mouse_show_en }
 pub fn mouse_target_cursors() -> &'static [u32] { &get().mouse_target_cursors }
+
+// --- CAPS_INDICATOR_START ---
+pub fn caps_enable() -> bool { get().caps_enable }
+pub fn caps_color() -> u32 { get().caps_color }
+// --- CAPS_INDICATOR_END ---
