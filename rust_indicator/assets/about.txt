@@ -1,9 +1,9 @@
 输入指示器 (IME Indicator)
 
-轻量级中英输入法状态实时提示工具。
+轻量级输入法状态实时提示工具（中、英、大写）。
 
 GitHub: https://github.com/HaujetZhao/IME_Indicator
 作者：Antigravity & Haujet
 版本：v0.2.1
 
-备注：新增了大小写指示器，而且一切都是Gemini的功劳，我不会编程，所有修订代码由Gemini和原作者所有，exe由Github自动编译。
+备注：新增了大写指示器，且一切都是Gemini的功劳，我不会编程，所有修订代码由Gemini和原作者所有，exe由Github自动编译。
