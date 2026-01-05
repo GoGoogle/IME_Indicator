@@ -5,6 +5,8 @@ use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE, LPARAM, LRESULT, W
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    // 关键修复：0.58.0 路径
+    BLENDFUNCTION, AC_SRC_OVER, AC_SRC_ALPHA
 };
 use windows::Win32::Graphics::GdiPlus::{
     GdipCreateFromHDC, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
@@ -16,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow,
     HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
     ULW_ALPHA, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP, BLENDFUNCTION, AC_SRC_OVER, AC_SRC_ALPHA
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 pub struct IndicatorOverlay {
@@ -30,7 +32,6 @@ pub struct IndicatorOverlay {
     gdi_token: usize,
 }
 
-// 核心修复：手动定义一个符合 "system" 签名的 WNDPROC，防止编译器的类型推导错误
 extern "system" fn overlay_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
@@ -46,7 +47,7 @@ impl IndicatorOverlay {
             let cls_name = w!("IndicatorOverlayClass");
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(overlay_wndproc), // 使用上面定义的 extern "system" 函数
+                lpfnWndProc: Some(overlay_wndproc),
                 hInstance: h_inst.into(),
                 lpszClassName: cls_name,
                 ..Default::default()
@@ -94,17 +95,11 @@ impl IndicatorOverlay {
                 AlphaFormat: AC_SRC_ALPHA as u8 
             };
             
-            // 修复：UpdateLayeredWindow 在 0.58.0 中需要 &T 类型
             let _ = UpdateLayeredWindow(
-                self.hwnd, 
-                screen_dc, 
-                Some(&dest), 
+                self.hwnd, screen_dc, Some(&dest), 
                 Some(&SIZE { cx: self.size, cy: self.size }), 
-                mem_dc, 
-                Some(&POINT::default()), 
-                COLORREF(0), 
-                Some(&blend), 
-                ULW_ALPHA
+                mem_dc, Some(&POINT::default()), COLORREF(0), 
+                Some(&blend), ULW_ALPHA
             );
             
             SelectObject(mem_dc, old_bmp);
@@ -112,7 +107,6 @@ impl IndicatorOverlay {
             let _ = DeleteDC(mem_dc);
             ReleaseDC(None, screen_dc);
             
-            // 修复拼写：HW_TOPMOST -> HWND_TOPMOST
             let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             
             let mut msg = MSG::default();
