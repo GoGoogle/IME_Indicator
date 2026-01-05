@@ -2,6 +2,9 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
+// --- CAPS_INDICATOR_START ---
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
+// --- CAPS_INDICATOR_END ---
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
     SendMessageTimeoutW, GUITHREADINFO, SMTO_ABORTIFHUNG,
@@ -81,10 +84,17 @@ pub fn is_chinese_mode() -> bool {
         return false;
     }
 
-    // 获取转换模式并检测是否包含 NATIVE 标志 (中文)
+    // 获取转换模式
     if let Some(conversion_mode) = send_message_timeout(ime_hwnd, WM_IME_CONTROL, IMC_GETCONVERSIONMODE, 0) {
         return (conversion_mode as u32 & IME_CMODE_NATIVE) != 0;
     }
 
     false
 }
+
+// --- CAPS_INDICATOR_START ---
+/// 检测 Caps Lock 状态
+pub fn is_caps_lock_on() -> bool {
+    unsafe { (GetKeyState(VK_CAPITAL.0 as i32) & 1) != 0 }
+}
+// --- CAPS_INDICATOR_END ---
