@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use std::ptr::null_mut;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, LoadIconW, IDI_APPLICATION};
 use caret_detector::CaretDetector;
@@ -17,14 +18,22 @@ fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
     thread::spawn(move || run_detector_loop(r_clone));
+    
     unsafe {
         let mut token = 0;
         let input = windows::Win32::Graphics::GdiPlus::GdiplusStartupInput { GdiplusVersion: 1, ..Default::default() };
-        let _ = windows::Win32::Graphics::GdiPlus::GdiplusStartup(&mut token, &input, None);
+        let _ = windows::Win32::Graphics::GdiPlus::GdiplusStartup(&mut token, &input, null_mut());
+        
         if config::tray_enable() {
             let h_icon = LoadIconW(None, IDI_APPLICATION).unwrap();
             let mut tray = TrayManager::new(h_icon);
-            tray.run();
+            // 这里调用托盘消息循环，保持程序运行
+            use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, TranslateMessage, DispatchMessageW, MSG};
+            let mut msg = MSG::default();
+            while running.load(Ordering::SeqCst) && GetMessageW(&mut msg, None, 0, 0).into() {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         } else {
             while running.load(Ordering::SeqCst) { thread::sleep(Duration::from_millis(100)); }
         }
