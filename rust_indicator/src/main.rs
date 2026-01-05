@@ -26,7 +26,7 @@ fn main() {
         
         if config::tray_enable() {
             let h_icon = LoadIconW(None, IDI_APPLICATION).unwrap();
-            let mut tray = TrayManager::new(h_icon);
+            let _tray = TrayManager::new(h_icon);
             // 这里调用托盘消息循环，保持程序运行
             use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, TranslateMessage, DispatchMessageW, MSG};
             let mut msg = MSG::default();
