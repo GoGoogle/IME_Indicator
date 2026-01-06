@@ -4,7 +4,7 @@ on:
   push:
     # 只要推送以 v 开头的标签（如 v1.0.0），就会触发发布逻辑
     tags:
-      - 'v*' 
+      - 'rust_v*' 
   workflow_dispatch: # 保留手动触发按钮
 
 jobs:
