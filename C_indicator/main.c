@@ -4,12 +4,11 @@
 
 #include <windows.h>
 #include <imm.h>
-#include <shellapi.h>
 #include <ole2.h>
 #include <uiautomation.h>
+#include <shellapi.h>
 
-/* ================= GDI+ MINIMAL ================= */
-
+/* ---------------- GDI+ minimal ---------------- */
 typedef float REAL;
 typedef UINT32 ARGB;
 typedef enum { SmoothingModeAntiAlias = 4 } SmoothingMode;
@@ -24,76 +23,61 @@ struct GdiplusStartupInput {
     BOOL SuppressExternalCodecs;
 };
 
-__declspec(dllimport) int  __stdcall GdiplusStartup(ULONG_PTR*, const struct GdiplusStartupInput*, void*);
+__declspec(dllimport) int __stdcall GdiplusStartup(ULONG_PTR*, const struct GdiplusStartupInput*, void*);
 __declspec(dllimport) void __stdcall GdiplusShutdown(ULONG_PTR);
-__declspec(dllimport) int  __stdcall GdipCreateFromHDC(HDC, GpGraphics**);
-__declspec(dllimport) int  __stdcall GdipDeleteGraphics(GpGraphics*);
-__declspec(dllimport) int  __stdcall GdipSetSmoothingMode(GpGraphics*, SmoothingMode);
-__declspec(dllimport) int  __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
-__declspec(dllimport) int  __stdcall GdipDeleteBrush(GpBrush*);
-__declspec(dllimport) int  __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
+__declspec(dllimport) int __stdcall GdipCreateFromHDC(HDC, GpGraphics**);
+__declspec(dllimport) int __stdcall GdipDeleteGraphics(GpGraphics*);
+__declspec(dllimport) int __stdcall GdipSetSmoothingMode(GpGraphics*, SmoothingMode);
+__declspec(dllimport) int __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
+__declspec(dllimport) int __stdcall GdipDeleteBrush(GpBrush*);
+__declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
 
-/* ================= CONFIG ================= */
-
+/* ---------------- config ---------------- */
 #define INDICATOR_SIZE 12
+#define COLOR_CN   0xA0FF7800
+#define COLOR_EN   0x300078FF
+#define COLOR_CAPS 0xA000FF00
 
-#define COLOR_CN    0xA0FF7800
-#define COLOR_EN    0x300078FF
-#define COLOR_CAPS  0xA000FF00
+#define WM_TRAYICON (WM_USER + 100)
+#define ID_EXIT     1
 
-#define ID_TRAY_EXIT  5001
-#define WM_TRAYICON   (WM_USER + 101)
-#define WM_REDRAW     (WM_USER + 200)
+#pragma comment(lib,"user32.lib")
+#pragma comment(lib,"gdi32.lib")
+#pragma comment(lib,"gdiplus.lib")
+#pragma comment(lib,"imm32.lib")
+#pragma comment(lib,"ole32.lib")
+#pragma comment(lib,"shell32.lib")
 
-/* ================= GLOBALS ================= */
-
+/* ---------------- globals ---------------- */
 HWND g_hwnd;
 ULONG_PTR g_gdiplus;
 NOTIFYICONDATAW g_nid;
 
 IUIAutomation* g_uia = NULL;
-IUIAutomationFocusChangedEventHandler* g_focusHandler = NULL;
 
-POINT g_lastPt = { -10000, -10000 };
-unsigned int g_lastColor = 0;
-volatile BOOL g_needRedraw = TRUE;
+POINT g_lastPt = { -1,-1 };
+UINT  g_lastColor = 0;
 
-/* ================= IME STATE ================= */
-
-void GetState(unsigned int* color)
-{
+/* ---------------- IME state ---------------- */
+UINT GetImeColor(void) {
     HWND fg = GetForegroundWindow();
     BOOL cn = FALSE;
 
     if (fg) {
         HWND ime = ImmGetDefaultIMEWnd(fg);
-        if (ime) {
-            DWORD_PTR open = 0;
-            if (SendMessageTimeoutW(
-                    ime, 0x0283, 0x005, 0,
-                    SMTO_ABORTIFHUNG, 20, &open) && open) {
-
-                DWORD_PTR mode = 0;
-                SendMessageTimeoutW(
-                    ime, 0x0283, 0x001, 0,
-                    SMTO_ABORTIFHUNG, 20, &mode);
-                cn = (mode & 1);
-            }
+        DWORD_PTR open = 0, mode = 0;
+        SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 20, &open);
+        if (open) {
+            SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 20, &mode);
+            cn = (mode & 1);
         }
     }
-
-    if (GetKeyState(VK_CAPITAL) & 1)
-        *color = COLOR_CAPS;
-    else
-        *color = cn ? COLOR_CN : COLOR_EN;
+    if (GetKeyState(VK_CAPITAL) & 1) return COLOR_CAPS;
+    return cn ? COLOR_CN : COLOR_EN;
 }
 
-/* ================= UIA CARET ================= */
-
-BOOL GetCaretPos_UIA(POINT* pt)
-{
-    if (!g_uia) return FALSE;
-
+/* ---------------- caret via UIA TextPattern ---------------- */
+BOOL GetCaretFromUIA(POINT* pt) {
     IUIAutomationElement* el = NULL;
     if (FAILED(g_uia->lpVtbl->GetFocusedElement(g_uia, &el)) || !el)
         return FALSE;
@@ -108,9 +92,7 @@ BOOL GetCaretPos_UIA(POINT* pt)
     }
 
     IUIAutomationTextRange* range = NULL;
-    BOOL active = FALSE;
-    hr = tp2->lpVtbl->GetCaretRange(tp2, &active, &range);
-
+    hr = tp2->lpVtbl->GetCaretRange(tp2, NULL, &range);
     if (FAILED(hr) || !range) {
         tp2->lpVtbl->Release(tp2);
         el->lpVtbl->Release(el);
@@ -118,15 +100,15 @@ BOOL GetCaretPos_UIA(POINT* pt)
     }
 
     SAFEARRAY* rects = NULL;
-    range->lpVtbl->GetBoundingRectangles(range, &rects);
-
-    if (rects && rects->rgsabound[0].cElements >= 4) {
-        double* p;
-        SafeArrayAccessData(rects, (void**)&p);
-        pt->x = (LONG)p[0] + 2;
-        pt->y = (LONG)(p[1] + p[3]) + 2;
+    hr = range->lpVtbl->GetBoundingRectangles(range, &rects);
+    if (SUCCEEDED(hr) && rects && rects->rgsabound[0].cElements >= 4) {
+        double* d;
+        SafeArrayAccessData(rects, (void**)&d);
+        pt->x = (LONG)d[0] + 2;
+        pt->y = (LONG)(d[1] + d[3]) + 2;
         SafeArrayUnaccessData(rects);
         SafeArrayDestroy(rects);
+
         range->lpVtbl->Release(range);
         tp2->lpVtbl->Release(tp2);
         el->lpVtbl->Release(el);
@@ -140,40 +122,34 @@ BOOL GetCaretPos_UIA(POINT* pt)
     return FALSE;
 }
 
-/* ================= TARGET POS ================= */
-
-void GetTargetPos(POINT* pt)
-{
-    if (GetCaretPos_UIA(pt))
-        return;
-
+/* ---------------- fallback caret ---------------- */
+void GetCaretFallback(POINT* pt) {
+    GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
-    GUITHREADINFO gti = { sizeof(GUITHREADINFO) };
     if (fg &&
         GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti) &&
-        gti.hwndCaret &&
-        !IsRectEmpty(&gti.rcCaret)) {
-
-        POINT cp = { gti.rcCaret.left, gti.rcCaret.bottom };
-        ClientToScreen(gti.hwndCaret, &cp);
-        pt->x = cp.x + 2;
-        pt->y = cp.y + 2;
+        gti.hwndCaret) {
+        POINT p = { gti.rcCaret.left, gti.rcCaret.bottom };
+        ClientToScreen(gti.hwndCaret, &p);
+        *pt = p;
         return;
     }
-
     GetCursorPos(pt);
-    pt->x += 2;
-    pt->y += 20;
+    pt->y += 18;
 }
 
-/* ================= RENDER ================= */
+/* ---------------- render ---------------- */
+void RenderIndicator(POINT pt, UINT color) {
+    if (pt.x == g_lastPt.x && pt.y == g_lastPt.y && color == g_lastColor)
+        return;
 
-void Render(const POINT* pt, unsigned int color)
-{
+    g_lastPt = pt;
+    g_lastColor = color;
+
     HDC hdc = GetDC(NULL);
     HDC mdc = CreateCompatibleDC(hdc);
 
-    BITMAPINFO bi = {0};
+    BITMAPINFO bi = { 0 };
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = INDICATOR_SIZE;
     bi.bmiHeader.biHeight = INDICATOR_SIZE;
@@ -189,17 +165,13 @@ void Render(const POINT* pt, unsigned int color)
     GpSolidFill* b;
     GdipCreateFromHDC(mdc, &g);
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-    GdipCreateSolidFill((ARGB)color, &b);
-    GdipFillEllipse(g, b, 0, 0,
-                    (REAL)INDICATOR_SIZE,
-                    (REAL)INDICATOR_SIZE);
+    GdipCreateSolidFill(color, &b);
+    GdipFillEllipse(g, b, 0, 0, INDICATOR_SIZE, INDICATOR_SIZE);
 
     SIZE sz = { INDICATOR_SIZE, INDICATOR_SIZE };
-    POINT src = { 0, 0 };
-    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-
-    UpdateLayeredWindow(g_hwnd, hdc, (POINT*)pt, &sz,
-                        mdc, &src, 0, &bf, ULW_ALPHA);
+    POINT src = { 0,0 };
+    BLENDFUNCTION bf = { AC_SRC_OVER,0,255,AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_hwnd, hdc, &pt, &sz, mdc, &src, 0, &bf, ULW_ALPHA);
 
     GdipDeleteBrush(b);
     GdipDeleteGraphics(g);
@@ -209,167 +181,84 @@ void Render(const POINT* pt, unsigned int color)
     ReleaseDC(NULL, hdc);
 }
 
-/* ================= UIA FOCUS EVENT ================= */
+/* ---------------- WinEvent hook ---------------- */
+void CALLBACK WinEventProc(
+    HWINEVENTHOOK h, DWORD ev, HWND hwnd,
+    LONG idObj, LONG idChild,
+    DWORD tid, DWORD time) {
 
-typedef struct {
-    IUIAutomationFocusChangedEventHandler iface;
-    LONG ref;
-} FocusHandler;
+    POINT pt;
+    if (!GetCaretFromUIA(&pt))
+        GetCaretFallback(&pt);
 
-HRESULT STDMETHODCALLTYPE FH_QueryInterface(
-    IUIAutomationFocusChangedEventHandler* self,
-    REFIID riid, void** ppv)
-{
-    if (IsEqualIID(riid, &IID_IUnknown) ||
-        IsEqualIID(riid, &IID_IUIAutomationFocusChangedEventHandler)) {
-        *ppv = self;
-        InterlockedIncrement(&((FocusHandler*)self)->ref);
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
+    RenderIndicator(pt, GetImeColor());
 }
 
-ULONG STDMETHODCALLTYPE FH_AddRef(IUIAutomationFocusChangedEventHandler* self)
-{
-    return InterlockedIncrement(&((FocusHandler*)self)->ref);
-}
-
-ULONG STDMETHODCALLTYPE FH_Release(IUIAutomationFocusChangedEventHandler* self)
-{
-    LONG r = InterlockedDecrement(&((FocusHandler*)self)->ref);
-    if (!r) HeapFree(GetProcessHeap(), 0, self);
-    return r;
-}
-
-HRESULT STDMETHODCALLTYPE FH_HandleFocusChangedEvent(
-    IUIAutomationFocusChangedEventHandler* self,
-    IUIAutomationElement* sender)
-{
-    PostMessageW(g_hwnd, WM_REDRAW, 0, 0);
-    return S_OK;
-}
-
-IUIAutomationFocusChangedEventHandlerVtbl g_focusVtbl = {
-    FH_QueryInterface,
-    FH_AddRef,
-    FH_Release,
-    FH_HandleFocusChangedEvent
-};
-
-/* ================= WINDOW ================= */
-
-LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
-{
-    if (m == WM_REDRAW) {
-        g_needRedraw = TRUE;
-        return 0;
-    }
-
+/* ---------------- window ---------------- */
+LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && l == WM_RBUTTONUP) {
-        POINT p;
-        GetCursorPos(&p);
-        HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出 (Exit)");
+        HMENU mnu = CreatePopupMenu();
+        AppendMenuW(mnu, MF_STRING, ID_EXIT, L"Exit");
+        POINT p; GetCursorPos(&p);
         SetForegroundWindow(h);
-        TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
-        DestroyMenu(menu);
+        TrackPopupMenu(mnu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
+        DestroyMenu(mnu);
         return 0;
     }
-
-    if (m == WM_COMMAND && LOWORD(w) == ID_TRAY_EXIT) {
+    if (m == WM_COMMAND && LOWORD(w) == ID_EXIT) {
         DestroyWindow(h);
         return 0;
     }
-
     if (m == WM_DESTROY) {
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
     }
-
     return DefWindowProcW(h, m, w, l);
 }
 
-/* ================= ENTRY ================= */
-
-int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int)
-{
+/* ---------------- entry ---------------- */
+int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     CoInitialize(NULL);
-
     CoCreateInstance(&CLSID_CUIAutomation, NULL,
-        CLSCTX_INPROC_SERVER,
-        &IID_IUIAutomation,
-        (void**)&g_uia);
+        CLSCTX_INPROC_SERVER, &IID_IUIAutomation, (void**)&g_uia);
 
-    if (g_uia) {
-        FocusHandler* fh = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(FocusHandler));
-        fh->iface.lpVtbl = &g_focusVtbl;
-        fh->ref = 1;
-        g_focusHandler = (IUIAutomationFocusChangedEventHandler*)fh;
-        g_uia->lpVtbl->AddFocusChangedEventHandler(g_uia, NULL, g_focusHandler);
-    }
-
-    struct GdiplusStartupInput si = { 1, NULL, FALSE, FALSE };
+    struct GdiplusStartupInput si = { 1,NULL,FALSE,FALSE };
     GdiplusStartup(&g_gdiplus, &si, NULL);
 
-    WNDCLASSEXW wc = { sizeof(wc), 0, WndProc, 0, 0, hi,
-                       NULL, NULL, NULL, NULL, L"IME_IND", NULL };
+    WNDCLASSEXW wc = { sizeof(wc),0,WndProc,0,0,hi };
+    wc.lpszClassName = L"IME_IND";
     RegisterClassExW(&wc);
 
     g_hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-        L"IME_IND", L"", WS_POPUP,
-        0, 0, INDICATOR_SIZE, INDICATOR_SIZE,
+        wc.lpszClassName, L"",
+        WS_POPUP, 0, 0, 0, 0,
         NULL, NULL, hi, NULL);
 
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = g_hwnd;
     g_nid.uID = 1;
-    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uFlags = NIF_MESSAGE | NIF_ICON;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    lstrcpyW(g_nid.szTip, L"IME 状态指示器");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
+
+    SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE,
+        NULL, WinEventProc, 0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
     ShowWindow(g_hwnd, SW_SHOW);
 
     MSG msg;
-    while (1) {
-        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT)
-                goto exit;
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        if (g_needRedraw) {
-            POINT pt;
-            unsigned int color;
-            GetTargetPos(&pt);
-            GetState(&color);
-
-            if (pt.x != g_lastPt.x ||
-                pt.y != g_lastPt.y ||
-                color != g_lastColor) {
-
-                Render(&pt, color);
-                g_lastPt = pt;
-                g_lastColor = color;
-            }
-            g_needRedraw = FALSE;
-        }
-
-        Sleep(50);
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-exit:
-    if (g_uia && g_focusHandler)
-        g_uia->lpVtbl->RemoveFocusChangedEventHandler(g_uia, g_focusHandler);
     if (g_uia) g_uia->lpVtbl->Release(g_uia);
-
-    CoUninitialize();
     GdiplusShutdown(g_gdiplus);
+    CoUninitialize();
     return 0;
 }
