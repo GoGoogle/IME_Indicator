@@ -11,12 +11,13 @@
 #pragma comment(lib,"imm32.lib")
 #pragma comment(lib,"shell32.lib")
 
-#define IND_W 20
-#define IND_H 20
+#define IND_W 24
+#define IND_H 24
 
-#define COLOR_CN   RGB(255,120,0)
-#define COLOR_EN   RGB(0,120,255)
-#define COLOR_CAPS RGB(0,200,0)
+// 颜色定义
+#define COLOR_CN   0x004B78FF // 橙红色 (BGR)
+#define COLOR_EN   0x00FF7800 // 天蓝色 (BGR)
+#define COLOR_CAPS 0x0000C800 // 绿色 (BGR)
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_EXIT     1
@@ -24,17 +25,8 @@
 static HWND g_hwnd;
 static NOTIFYICONDATAW g_nid;
 
-static POINT     g_lastPt  = { -1,-1 };
-static WCHAR     g_lastCh  = 0;
-static COLORREF  g_lastClr = 0;
-
-/* ---------------- DPI 修复 ---------------- */
-void EnableDPI(void) {
-    SetProcessDPIAware(); // 简化 DPI 适配，确保跨屏坐标正确
-}
-
 /* ---------------- 状态查询 ---------------- */
-WCHAR QueryStateChar(COLORREF* clr) {
+WCHAR QueryState(COLORREF* clr) {
     if (GetKeyState(VK_CAPITAL) & 1) {
         *clr = COLOR_CAPS;
         return L'A';
@@ -56,41 +48,30 @@ WCHAR QueryStateChar(COLORREF* clr) {
     return L'E';
 }
 
-/* ---------------- 光标定位 ---------------- */
-BOOL QueryCaretScreenPos(POINT* pt) {
+/* ---------------- 渲染引擎 (核心修复) ---------------- */
+void Render(void) {
+    POINT pt;
     GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
-    if (!fg) return FALSE;
-    if (!GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti)) return FALSE;
-    if (!gti.hwndCaret) return FALSE;
+    
+    // 优先获取光标位置
+    if (fg && GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti) && gti.hwndCaret) {
+        pt.x = gti.rcCaret.left;
+        pt.y = gti.rcCaret.bottom;
+        ClientToScreen(gti.hwndCaret, &pt);
+        pt.x += 4; pt.y += 4;
+    } else {
+        // 回退到鼠标
+        GetCursorPos(&pt);
+        pt.x += 10; pt.y += 18;
+    }
 
-    POINT p = { gti.rcCaret.left, gti.rcCaret.bottom };
-    ClientToScreen(gti.hwndCaret, &p);
-    *pt = p;
-    return TRUE;
-}
-
-/* ---------------- 屏幕边缘限制 ---------------- */
-void ClampToMonitor(POINT* pt) {
-    HMONITOR mon = MonitorFromPoint(*pt, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfoW(mon, &mi);
-    if (pt->x + IND_W > mi.rcWork.right) pt->x = mi.rcWork.right - IND_W;
-    if (pt->y + IND_H > mi.rcWork.bottom) pt->y = mi.rcWork.bottom - IND_H;
-    if (pt->x < mi.rcWork.left) pt->x = mi.rcWork.left;
-    if (pt->y < mi.rcWork.top) pt->y = mi.rcWork.top;
-}
-
-/* ---------------- 核心渲染 (修复 Alpha 通道) ---------------- */
-void Render(POINT pt, WCHAR ch, COLORREF clr) {
-    // 性能优化：只有在状态或位置变化时才重绘
-    if (pt.x == g_lastPt.x && pt.y == g_lastPt.y && ch == g_lastCh && clr == g_lastClr) return;
-    g_lastPt = pt; g_lastCh = ch; g_lastClr = clr;
+    COLORREF clr;
+    WCHAR ch = QueryState(&clr);
 
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     
-    // 创建包含 Alpha 通道的位图
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = IND_W;
@@ -103,31 +84,32 @@ void Render(POINT pt, WCHAR ch, COLORREF clr) {
     HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
 
-    // 绘制背景圆角矩形
-    RECT r = {0, 0, IND_W, IND_H};
+    // 绘制彩色背景小点（实心圆）
     HBRUSH hBr = CreateSolidBrush(clr);
-    FillRect(hdcMem, &r, hBr);
+    SelectObject(hdcMem, hBr);
+    Ellipse(hdcMem, 0, 0, IND_W, IND_H);
     DeleteObject(hBr);
 
-    // 绘制文字
+    // 绘制白色的字母 C/E/A
     SetBkMode(hdcMem, TRANSPARENT);
-    SetTextColor(hdcMem, RGB(255, 255, 255)); // 文字统一用白色，背景显色
-    HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+    SetTextColor(hdcMem, RGB(255, 255, 255));
+    HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_EXTRABOLD, 0, 0, 0, DEFAULT_CHARSET, 
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, 
                              DEFAULT_PITCH, L"Arial");
     HGDIOBJ hOldFont = SelectObject(hdcMem, hFont);
+    RECT r = {0, 0, IND_W, IND_H};
     WCHAR s[2] = { ch, 0 };
     DrawTextW(hdcMem, s, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // 更新分层窗口
+    // 必须处理 Alpha 通道，否则分层窗口看不见
+    LPDWORD pdw = (LPDWORD)pBits;
+    for (int i = 0; i < IND_W * IND_H; i++) {
+        if (pdw[i] != 0) pdw[i] |= 0xFF000000; // 有颜色的地方设为不透明
+    }
+
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     POINT ptSrc = {0, 0};
     SIZE szWin = { IND_W, IND_H };
-    
-    // 注意：这里需要对所有像素设置 Alpha=255，否则 UpdateLayeredWindow 会变透明
-    LPDWORD pdw = (LPDWORD)pBits;
-    for (int i = 0; i < IND_W * IND_H; i++) pdw[i] |= 0xFF000000;
-
     UpdateLayeredWindow(g_hwnd, hdcScreen, &pt, &szWin, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
 
     SelectObject(hdcMem, hOldFont);
@@ -138,20 +120,6 @@ void Render(POINT pt, WCHAR ch, COLORREF clr) {
     ReleaseDC(NULL, hdcScreen);
 }
 
-/* ---------------- 修复：WinEventProc 参数 ---------------- */
-void CALLBACK WinEventProc(HWINEVENTHOOK hHook, DWORD event, HWND hwnd, LONG idObj, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-    POINT pt;
-    if (!QueryCaretScreenPos(&pt)) {
-        GetCursorPos(&pt);
-        pt.y += 20;
-    }
-    ClampToMonitor(&pt);
-    COLORREF clr;
-    WCHAR ch = QueryStateChar(&clr);
-    Render(pt, ch, clr);
-}
-
-/* ---------------- 窗口消息处理 ---------------- */
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && (l == WM_RBUTTONUP || l == WM_LBUTTONUP)) {
         HMENU menu = CreatePopupMenu();
@@ -164,26 +132,25 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     if (m == WM_COMMAND && LOWORD(w) == ID_EXIT) {
         DestroyWindow(h);
-        return 0;
     }
+    if (m == WM_TIMER) Render();
     if (m == WM_DESTROY) {
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
-        return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
 
-/* ---------------- 修复：WinMain 参数 ---------------- */
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    EnableDPI();
+    SetProcessDPIAware(); // 确保在高 DPI 下位置不偏移
 
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"IME_IND_V3";
+    wc.lpszClassName = L"IME_INDICATOR_V4";
     RegisterClassExW(&wc);
 
+    // 关键属性：WS_EX_NOACTIVATE（不抢焦点）、WS_EX_TRANSPARENT（鼠标穿透）
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                              wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
@@ -193,19 +160,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    wcscpy(g_nid.szTip, L"IME Indicator");
+    wcscpy(g_nid.szTip, L"输入法状态指示器");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
-    SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE, NULL, WinEventProc, 0, 0, WINEVENT_OUTOFCONTEXT);
-
-    // 增加定时器，确保鼠标跟随更平滑
+    // 每 16ms 刷新一次（约 60 帧），保证平滑移动
     SetTimer(g_hwnd, 1, 16, NULL);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_TIMER) {
-            WinEventProc(NULL, 0, NULL, 0, 0, 0, 0); // 借用 Event 函数刷新
-        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
