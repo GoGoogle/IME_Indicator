@@ -37,12 +37,12 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         name: IME Indicator C-Version ${{ github.ref_name }}
-        body: "纯 C 重构版：位于子目录 C_indicator 下的编译版本。
-        让Gemini使用C语言重构的版本
-        功能如下：
-        英文状态：蓝底白字 E；
-        中文状态：橙底白字 C；
-        大写锁定：绿底白字 A；
+        body: "纯 C 重构版：位于子目录 C_indicator 下的编译版本。\n
+        让Gemini使用C语言重构的版本\n
+        功能如下：\n
+        英文状态：蓝底白字 E；\n
+        中文状态：橙底白字 C；\n
+        大写锁定：绿底白字 A；\n
         只包括一个退出按钮，且在Windows10上测试通过。"
         # --- 关键修改点 3：这里的路径也要对应 ---
         files: ./C_indicator/IME-Indicator-C.exe
