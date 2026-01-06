@@ -7,7 +7,6 @@
 #include <shellapi.h>
 #include <ole2.h>
 #include <uiautomation.h>
-#include <msctf.h>
 
 /* ================= GDI+ MINIMAL ================= */
 
@@ -44,7 +43,7 @@ __declspec(dllimport) int  __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL
 
 #define ID_TRAY_EXIT  5001
 #define WM_TRAYICON   (WM_USER + 101)
-#define WM_INTERNAL_REDRAW (WM_USER + 200)
+#define WM_REDRAW     (WM_USER + 200)
 
 /* ================= GLOBALS ================= */
 
@@ -55,10 +54,7 @@ NOTIFYICONDATAW g_nid;
 IUIAutomation* g_uia = NULL;
 IUIAutomationFocusChangedEventHandler* g_focusHandler = NULL;
 
-ITfThreadMgr* g_tsfMgr = NULL;
-DWORD g_tsfCookie = TF_INVALID_COOKIE;
-
-POINT g_lastPt = { -9999, -9999 };
+POINT g_lastPt = { -10000, -10000 };
 unsigned int g_lastColor = 0;
 volatile BOOL g_needRedraw = TRUE;
 
@@ -144,7 +140,7 @@ BOOL GetCaretPos_UIA(POINT* pt)
     return FALSE;
 }
 
-/* ================= CARET FALLBACK ================= */
+/* ================= TARGET POS ================= */
 
 void GetTargetPos(POINT* pt)
 {
@@ -185,12 +181,12 @@ void Render(const POINT* pt, unsigned int color)
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
 
-    void* bits = NULL;
+    void* bits;
     HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     HGDIOBJ old = SelectObject(mdc, bmp);
 
-    GpGraphics* g = NULL;
-    GpSolidFill* b = NULL;
+    GpGraphics* g;
+    GpSolidFill* b;
     GdipCreateFromHDC(mdc, &g);
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
     GdipCreateSolidFill((ARGB)color, &b);
@@ -202,9 +198,8 @@ void Render(const POINT* pt, unsigned int color)
     POINT src = { 0, 0 };
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
 
-    UpdateLayeredWindow(
-        g_hwnd, hdc, (POINT*)pt, &sz,
-        mdc, &src, 0, &bf, ULW_ALPHA);
+    UpdateLayeredWindow(g_hwnd, hdc, (POINT*)pt, &sz,
+                        mdc, &src, 0, &bf, ULW_ALPHA);
 
     GdipDeleteBrush(b);
     GdipDeleteGraphics(g);
@@ -228,7 +223,7 @@ HRESULT STDMETHODCALLTYPE FH_QueryInterface(
     if (IsEqualIID(riid, &IID_IUnknown) ||
         IsEqualIID(riid, &IID_IUIAutomationFocusChangedEventHandler)) {
         *ppv = self;
-        ((FocusHandler*)self)->ref++;
+        InterlockedIncrement(&((FocusHandler*)self)->ref);
         return S_OK;
     }
     *ppv = NULL;
@@ -251,7 +246,7 @@ HRESULT STDMETHODCALLTYPE FH_HandleFocusChangedEvent(
     IUIAutomationFocusChangedEventHandler* self,
     IUIAutomationElement* sender)
 {
-    PostMessageW(g_hwnd, WM_INTERNAL_REDRAW, 0, 0);
+    PostMessageW(g_hwnd, WM_REDRAW, 0, 0);
     return S_OK;
 }
 
@@ -262,75 +257,18 @@ IUIAutomationFocusChangedEventHandlerVtbl g_focusVtbl = {
     FH_HandleFocusChangedEvent
 };
 
-/* ================= TSF SINK ================= */
-
-typedef struct {
-    ITfUIElementSink iface;
-    LONG ref;
-} TsfSink;
-
-HRESULT STDMETHODCALLTYPE TS_QueryInterface(ITfUIElementSink* self, REFIID riid, void** ppv)
-{
-    if (IsEqualIID(riid, &IID_IUnknown) ||
-        IsEqualIID(riid, &IID_ITfUIElementSink)) {
-        *ppv = self;
-        ((TsfSink*)self)->ref++;
-        return S_OK;
-    }
-    *ppv = NULL;
-    return E_NOINTERFACE;
-}
-
-ULONG STDMETHODCALLTYPE TS_AddRef(ITfUIElementSink* self)
-{
-    return InterlockedIncrement(&((TsfSink*)self)->ref);
-}
-
-ULONG STDMETHODCALLTYPE TS_Release(ITfUIElementSink* self)
-{
-    LONG r = InterlockedDecrement(&((TsfSink*)self)->ref);
-    if (!r) HeapFree(GetProcessHeap(), 0, self);
-    return r;
-}
-
-HRESULT STDMETHODCALLTYPE TS_BeginUIElement(ITfUIElementSink* self, DWORD id, BOOL* show)
-{
-    PostMessageW(g_hwnd, WM_INTERNAL_REDRAW, 0, 0);
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE TS_UpdateUIElement(ITfUIElementSink* self, DWORD id)
-{
-    PostMessageW(g_hwnd, WM_INTERNAL_REDRAW, 0, 0);
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE TS_EndUIElement(ITfUIElementSink* self, DWORD id)
-{
-    PostMessageW(g_hwnd, WM_INTERNAL_REDRAW, 0, 0);
-    return S_OK;
-}
-
-ITfUIElementSinkVtbl g_tsfVtbl = {
-    TS_QueryInterface,
-    TS_AddRef,
-    TS_Release,
-    TS_BeginUIElement,
-    TS_UpdateUIElement,
-    TS_EndUIElement
-};
-
 /* ================= WINDOW ================= */
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
-    if (m == WM_INTERNAL_REDRAW) {
+    if (m == WM_REDRAW) {
         g_needRedraw = TRUE;
         return 0;
     }
 
     if (m == WM_TRAYICON && l == WM_RBUTTONUP) {
-        POINT p; GetCursorPos(&p);
+        POINT p;
+        GetCursorPos(&p);
         HMENU menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出 (Exit)");
         SetForegroundWindow(h);
@@ -372,28 +310,11 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int)
         g_uia->lpVtbl->AddFocusChangedEventHandler(g_uia, NULL, g_focusHandler);
     }
 
-    CoCreateInstance(&CLSID_TF_ThreadMgr, NULL,
-        CLSCTX_INPROC_SERVER,
-        &IID_ITfThreadMgr,
-        (void**)&g_tsfMgr);
-
-    if (g_tsfMgr) {
-        TfClientId cid;
-        g_tsfMgr->lpVtbl->Activate(g_tsfMgr, &cid);
-        TsfSink* sink = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(TsfSink));
-        sink->iface.lpVtbl = &g_tsfVtbl;
-        sink->ref = 1;
-        ITfSource* src;
-        if (SUCCEEDED(g_tsfMgr->lpVtbl->QueryInterface(g_tsfMgr, &IID_ITfSource, (void**)&src))) {
-            src->lpVtbl->AdviseSink(src, &IID_ITfUIElementSink, &sink->iface, &g_tsfCookie);
-            src->lpVtbl->Release(src);
-        }
-    }
-
     struct GdiplusStartupInput si = { 1, NULL, FALSE, FALSE };
     GdiplusStartup(&g_gdiplus, &si, NULL);
 
-    WNDCLASSEXW wc = { sizeof(wc), 0, WndProc, 0, 0, hi, NULL, NULL, NULL, NULL, L"IME_IND", NULL };
+    WNDCLASSEXW wc = { sizeof(wc), 0, WndProc, 0, 0, hi,
+                       NULL, NULL, NULL, NULL, L"IME_IND", NULL };
     RegisterClassExW(&wc);
 
     g_hwnd = CreateWindowExW(
@@ -417,7 +338,8 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int)
     MSG msg;
     while (1) {
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) goto exit;
+            if (msg.message == WM_QUIT)
+                goto exit;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -438,22 +360,13 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int)
             }
             g_needRedraw = FALSE;
         }
+
         Sleep(50);
     }
 
 exit:
     if (g_uia && g_focusHandler)
         g_uia->lpVtbl->RemoveFocusChangedEventHandler(g_uia, g_focusHandler);
-
-    if (g_tsfMgr && g_tsfCookie != TF_INVALID_COOKIE) {
-        ITfSource* src;
-        if (SUCCEEDED(g_tsfMgr->lpVtbl->QueryInterface(g_tsfMgr, &IID_ITfSource, (void**)&src))) {
-            src->lpVtbl->UnadviseSink(src, g_tsfCookie);
-            src->lpVtbl->Release(src);
-        }
-    }
-
-    if (g_tsfMgr) g_tsfMgr->lpVtbl->Release(g_tsfMgr);
     if (g_uia) g_uia->lpVtbl->Release(g_uia);
 
     CoUninitialize();
