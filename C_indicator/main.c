@@ -5,11 +5,11 @@
 #include <windows.h>
 #include <imm.h>
 #include <ole2.h>
-#include <oleauto.h>   /* ← 关键：SAFEARRAY */
+#include <oleauto.h>
 #include <uiautomation.h>
 #include <shellapi.h>
 
-/* ---------------- GDI+ minimal ---------------- */
+/* -------- GDI+ minimal -------- */
 typedef float REAL;
 typedef UINT32 ARGB;
 typedef enum { SmoothingModeAntiAlias = 4 } SmoothingMode;
@@ -33,15 +33,6 @@ __declspec(dllimport) int __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
 __declspec(dllimport) int __stdcall GdipDeleteBrush(GpBrush*);
 __declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
 
-/* ---------------- config ---------------- */
-#define INDICATOR_SIZE 12
-#define COLOR_CN   0xA0FF7800
-#define COLOR_EN   0x300078FF
-#define COLOR_CAPS 0xA000FF00
-
-#define WM_TRAYICON (WM_USER + 100)
-#define ID_EXIT     1
-
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
 #pragma comment(lib,"gdiplus.lib")
@@ -50,7 +41,14 @@ __declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL,
 #pragma comment(lib,"oleaut32.lib")
 #pragma comment(lib,"shell32.lib")
 
-/* ---------------- globals ---------------- */
+#define INDICATOR_SIZE 12
+#define COLOR_CN   0xA0FF7800
+#define COLOR_EN   0x300078FF
+#define COLOR_CAPS 0xA000FF00
+
+#define WM_TRAYICON (WM_USER + 1)
+#define ID_EXIT     1
+
 HWND g_hwnd;
 ULONG_PTR g_gdiplus;
 NOTIFYICONDATAW g_nid;
@@ -59,7 +57,7 @@ IUIAutomation* g_uia = NULL;
 POINT g_lastPt = { -1,-1 };
 UINT  g_lastColor = 0;
 
-/* ---------------- IME state ---------------- */
+/* -------- IME state -------- */
 UINT GetImeColor(void) {
     HWND fg = GetForegroundWindow();
     BOOL cn = FALSE;
@@ -77,22 +75,32 @@ UINT GetImeColor(void) {
     return cn ? COLOR_CN : COLOR_EN;
 }
 
-/* ---------------- caret via UIA TextPattern2 ---------------- */
+/* -------- UIA caret via TextPattern -------- */
 BOOL GetCaretFromUIA(POINT* pt) {
     IUIAutomationElement* el = NULL;
     if (FAILED(g_uia->lpVtbl->GetFocusedElement(g_uia, &el)) || !el)
         return FALSE;
 
-    IUIAutomationTextPattern2* tp2 = NULL;
+    IUIAutomationTextPattern* tp = NULL;
     if (FAILED(el->lpVtbl->GetCurrentPattern(
-        el, UIA_TextPattern2Id, (IUnknown**)&tp2)) || !tp2) {
+        el, UIA_TextPatternId, (IUnknown**)&tp)) || !tp) {
+        el->lpVtbl->Release(el);
+        return FALSE;
+    }
+
+    IUIAutomationTextRangeArray* sel = NULL;
+    if (FAILED(tp->lpVtbl->GetSelection(tp, &sel)) || !sel) {
+        tp->lpVtbl->Release(tp);
         el->lpVtbl->Release(el);
         return FALSE;
     }
 
     IUIAutomationTextRange* range = NULL;
-    if (FAILED(tp2->lpVtbl->GetCaretRange(tp2, NULL, &range)) || !range) {
-        tp2->lpVtbl->Release(tp2);
+    sel->lpVtbl->GetElement(sel, 0, &range);
+    sel->lpVtbl->Release(sel);
+
+    if (!range) {
+        tp->lpVtbl->Release(tp);
         el->lpVtbl->Release(el);
         return FALSE;
     }
@@ -101,7 +109,7 @@ BOOL GetCaretFromUIA(POINT* pt) {
     if (SUCCEEDED(range->lpVtbl->GetBoundingRectangles(range, &rects)) &&
         rects && rects->rgsabound[0].cElements >= 4) {
 
-        double* d = NULL;
+        double* d;
         SafeArrayAccessData(rects, (void**)&d);
         pt->x = (LONG)d[0] + 2;
         pt->y = (LONG)(d[1] + d[3]) + 2;
@@ -109,19 +117,19 @@ BOOL GetCaretFromUIA(POINT* pt) {
         SafeArrayDestroy(rects);
 
         range->lpVtbl->Release(range);
-        tp2->lpVtbl->Release(tp2);
+        tp->lpVtbl->Release(tp);
         el->lpVtbl->Release(el);
         return TRUE;
     }
 
     if (rects) SafeArrayDestroy(rects);
     range->lpVtbl->Release(range);
-    tp2->lpVtbl->Release(tp2);
+    tp->lpVtbl->Release(tp);
     el->lpVtbl->Release(el);
     return FALSE;
 }
 
-/* ---------------- fallback caret ---------------- */
+/* -------- fallback -------- */
 void GetCaretFallback(POINT* pt) {
     GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
@@ -137,8 +145,8 @@ void GetCaretFallback(POINT* pt) {
     pt->y += 18;
 }
 
-/* ---------------- render ---------------- */
-void RenderIndicator(POINT pt, UINT color) {
+/* -------- render -------- */
+void Render(POINT pt, UINT color) {
     if (pt.x == g_lastPt.x && pt.y == g_lastPt.y && color == g_lastColor)
         return;
 
@@ -154,7 +162,6 @@ void RenderIndicator(POINT pt, UINT color) {
     bi.bmiHeader.biHeight = INDICATOR_SIZE;
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
 
     void* bits;
     HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
@@ -180,9 +187,9 @@ void RenderIndicator(POINT pt, UINT color) {
     ReleaseDC(NULL, hdc);
 }
 
-/* ---------------- WinEvent hook ---------------- */
+/* -------- WinEvent -------- */
 void CALLBACK WinEventProc(
-    HWINEVENTHOOK h, DWORD ev, HWND hwnd,
+    HWINEVENTHOOK h, DWORD e, HWND hwnd,
     LONG idObj, LONG idChild,
     DWORD tid, DWORD time) {
 
@@ -190,10 +197,10 @@ void CALLBACK WinEventProc(
     if (!GetCaretFromUIA(&pt))
         GetCaretFallback(&pt);
 
-    RenderIndicator(pt, GetImeColor());
+    Render(pt, GetImeColor());
 }
 
-/* ---------------- window ---------------- */
+/* -------- window -------- */
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && l == WM_RBUTTONUP) {
         HMENU mnu = CreatePopupMenu();
@@ -216,13 +223,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-/* ---------------- entry ---------------- */
+/* -------- entry -------- */
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     CoInitialize(NULL);
     CoCreateInstance(&CLSID_CUIAutomation, NULL,
         CLSCTX_INPROC_SERVER, &IID_IUIAutomation, (void**)&g_uia);
 
-    struct GdiplusStartupInput si = { 1,NULL,FALSE,FALSE };
+    struct GdiplusStartupInput si = { 1 };
     GdiplusStartup(&g_gdiplus, &si, NULL);
 
     WNDCLASSEXW wc = { sizeof(wc),0,WndProc,0,0,hi };
@@ -247,8 +254,6 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE,
         NULL, WinEventProc, 0, 0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-
-    ShowWindow(g_hwnd, SW_SHOW);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
