@@ -1,12 +1,14 @@
 #define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
+
 #include <windows.h>
 #include <imm.h>
 #include <shellapi.h>
 
-// 必须在 gdiplus 之前包含这个，并定义 Gdiplus 命名空间兼容
-#include <gdiplus/gdiplusflat.h> 
+// 核心修复：直接包含，不带文件夹前缀
+// 并且在包含之前强制指定 GDI+ 为 C 兼容模式
+#include <gdiplusflat.h> 
 
 // --- 配置区 ---
 #define INDICATOR_SIZE 12
@@ -26,6 +28,8 @@ HWND g_hwnd;
 ULONG_PTR g_token;
 NOTIFYICONDATAW g_nid = {0};
 UINT g_uShellRestart;
+
+// ... (AddTrayIcon 和 GetState 函数保持不变) ...
 
 void AddTrayIcon(HWND hwnd) {
     g_nid.cbSize = sizeof(g_nid);
@@ -72,7 +76,6 @@ void Render(int x, int y, unsigned int color) {
     HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     HGDIOBJ old = SelectObject(mdc, bmp);
 
-    // --- GDI+ C Flat API ---
     GpGraphics* g;
     GpSolidFill* b;
     GdipCreateFromHDC(mdc, &g);
@@ -100,7 +103,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR lp, int ns) {
-    // 修复：手动初始化结构体以适配纯 C
+    // 修复：显式使用结构体定义
     struct GdiplusStartupInput si = {1, NULL, FALSE, FALSE};
     GdiplusStartup(&g_token, &si, NULL);
     
