@@ -51,18 +51,93 @@ WCHAR QueryState(COLORREF* clr) {
     return L'E';
 }
 
-/* ---------------- 渲染核心 ---------------- */
+/* ---------------- 渲染核心 (深度修订版) ---------------- */
 void Render(void) {
     POINT pt;
-    GetCursorPos(&pt);
-    pt.x += 25;
-    pt.y += 25;
+    GUITHREADINFO gti = { sizeof(gti) };
+    HWND fg = GetForegroundWindow();
+    BOOL useCaret = FALSE;
+    
+    // 1. 深度探测输入状态
+    if (fg) {
+        DWORD tid = GetWindowThreadProcessId(fg, NULL);
+        if (GetGUIThreadInfo(tid, &gti)) {
+            // 必须满足：有光标句柄，且光标矩形合法（宽度或高度不为0）
+            if (gti.hwndCaret && (gti.rcCaret.bottom - gti.rcCaret.top > 0)) {
+                // 计算光标底部的屏幕坐标
+                POINT caretPt = { gti.rcCaret.left, gti.rcCaret.bottom };
+                ClientToScreen(gti.hwndCaret, &caretPt);
+                
+                // 过滤掉系统异常返回的 (0,0) 或负坐标
+                if (caretPt.x > 0 || caretPt.y > 0) {
+                    // 指示器水平居中于光标：光标左侧 + (光标宽度/2) - (指示器宽度/2)
+                    int caretWidth = gti.rcCaret.right - gti.rcCaret.left;
+                    pt.x = caretPt.x + (caretWidth / 2) - (IND_W / 2);
+                    pt.y = caretPt.y + 10; // 垂直下方偏移 10 像素
+                    useCaret = TRUE;
+                }
+            }
+        }
+    }
 
+    // 2. 非输入状态：跟随鼠标
+    if (!useCaret) {
+        GetCursorPos(&pt);
+        pt.x += 20; // 鼠标右侧偏移
+        pt.y += 20; // 鼠标下方偏移
+    }
+
+    // --- 以下为成熟的渲染逻辑，保持不变 ---
     COLORREF clr;
     WCHAR ch = QueryState(&clr);
-
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = IND_W;
+    bmi.bmiHeader.biHeight = IND_H;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = NULL;
+    HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
+    memset(pBits, 0, IND_W * IND_H * 4);
+
+    HBRUSH hBr = CreateSolidBrush(clr);
+    HGDIOBJ hOldBr = SelectObject(hdcMem, hBr);
+    HPEN hPen = CreatePen(PS_SOLID, 1, clr);
+    HGDIOBJ hOldPen = SelectObject(hdcMem, hPen);
+    Ellipse(hdcMem, 0, 0, IND_W - 1, IND_H - 1);
+
+    SetBkMode(hdcMem, TRANSPARENT);
+    SetTextColor(hdcMem, RGB(255, 255, 255));
+    HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
+                             DEFAULT_PITCH, L"Arial");
+    HGDIOBJ hOldFont = SelectObject(hdcMem, hFont);
+    RECT r = {0, 0, IND_W, IND_H};
+    WCHAR s[2] = { ch, 0 };
+    DrawTextW(hdcMem, s, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    LPDWORD pdw = (LPDWORD)pBits;
+    for (int i = 0; i < IND_W * IND_H; i++) {
+        if (pdw[i] != 0) pdw[i] |= 0xFF000000; 
+    }
+
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    POINT ptSrc = {0, 0};
+    SIZE szWin = { IND_W, IND_H };
+    UpdateLayeredWindow(g_hwnd, hdcScreen, &pt, &szWin, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
+
+    SelectObject(hdcMem, hOldFont); DeleteObject(hFont);
+    SelectObject(hdcMem, hOldPen); DeleteObject(hPen);
+    SelectObject(hdcMem, hOldBr); DeleteObject(hBr);
+    SelectObject(hdcMem, hOldBmp); DeleteObject(hBmp);
+    DeleteDC(hdcMem); ReleaseDC(NULL, hdcScreen);
+}
     
     // 创建 32 位 DIB 位图，这是分层窗口成功的关键
     BITMAPINFO bmi = {0};
