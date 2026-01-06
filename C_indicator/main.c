@@ -23,8 +23,34 @@
 #define ID_ABOUT    1001
 #define ID_EXIT     1002
 
+// 定义 DPI 上下文，防止旧版 SDK 编译报错
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)-4)
+#endif
+
 static HWND g_hwnd;
 static NOTIFYICONDATAW g_nid;
+
+/* ---------------- 深度 DPI 启用逻辑 (新增修复) ---------------- */
+void EnableDeepDPI(void) {
+    // 尝试调用 SetProcessDpiAwarenessContext (Win10 1607+)
+    // 这是解决多屏 DPI 坐标漂移/失效的终极方案
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        typedef BOOL (WINAPI * SetProcessDpiAwarenessContextProc)(DPI_AWARENESS_CONTEXT);
+        SetProcessDpiAwarenessContextProc setDpiAwareness = 
+            (SetProcessDpiAwarenessContextProc)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        
+        if (setDpiAwareness) {
+            // 启用 Per-Monitor V2 感知
+            if (setDpiAwareness(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+                return;
+            }
+        }
+    }
+    // 如果系统太老不支持 V2，回退到普通感知
+    SetProcessDPIAware();
+}
 
 /* ---------------- 状态查询 ---------------- */
 WCHAR QueryState(COLORREF* clr) {
@@ -36,7 +62,6 @@ WCHAR QueryState(COLORREF* clr) {
     HWND ime = fg ? ImmGetDefaultIMEWnd(fg) : NULL;
     DWORD_PTR open = 0, mode = 0;
     if (ime) {
-        // 使用更短的超时，避免卡顿
         if (SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 10, &open) && open) {
             SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 10, &mode);
         }
@@ -49,34 +74,30 @@ WCHAR QueryState(COLORREF* clr) {
     return L'E';
 }
 
-/* ---------------- 渲染核心 (只修订了坐标逻辑) ---------------- */
+/* ---------------- 渲染核心 ---------------- */
 void Render(void) {
     POINT pt = {0};
     GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
     BOOL bHasCaret = FALSE;
     
-    // --- 坐标获取逻辑修正开始 ---
     if (fg) {
         DWORD tid = GetWindowThreadProcessId(fg, NULL);
-        // 获取前台线程 GUI 信息
         if (GetGUIThreadInfo(tid, &gti)) {
-            // 1. 必须有光标句柄
-            // 2. 光标必须有高度 (排除隐形光标)
+            // 必须有光标句柄且高度有效
             if (gti.hwndCaret && (gti.rcCaret.bottom - gti.rcCaret.top > 0)) {
                 POINT caretPt = { gti.rcCaret.left, gti.rcCaret.bottom };
+                
+                // 关键：在 Per-Monitor V2 模式下，ClientToScreen 会返回准确的物理像素坐标
+                // 无论窗口在哪个屏幕，都不会发生漂移
                 ClientToScreen(gti.hwndCaret, &caretPt);
                 
-                // 3. 坐标必须在屏幕可见区域内 (排除 (0,0) 异常点)
+                // 排除 (0,0) 异常
                 if (caretPt.x > 0 && caretPt.y > 0) {
                     int caretWidth = gti.rcCaret.right - gti.rcCaret.left;
                     
-                    // 修正：居中对齐
-                    // 指示器X = 光标X + (光标宽/2) - (指示器宽/2)
+                    // 居中对齐逻辑
                     pt.x = caretPt.x + (caretWidth / 2) - (IND_W / 2);
-                    
-                    // 修正：垂直偏移
-                    // 紧贴光标底部再向下 2 像素
                     pt.y = caretPt.y + 2; 
                     
                     bHasCaret = TRUE;
@@ -84,13 +105,12 @@ void Render(void) {
             }
         }
     }
-    // --- 坐标获取逻辑修正结束 ---
 
-    // 如果没抓到有效光标，回退到鼠标跟随
+    // 回退到鼠标跟随
     if (!bHasCaret) {
         GetCursorPos(&pt);
-        pt.x += 25; // 鼠标右侧
-        pt.y += 25; // 鼠标下方
+        pt.x += 25; 
+        pt.y += 25; 
     }
 
     COLORREF clr;
@@ -99,7 +119,6 @@ void Render(void) {
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
     
-    // 创建 32 位 DIB 位图
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = IND_W;
@@ -112,10 +131,7 @@ void Render(void) {
     HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
 
-    // 1. 清空背景为透明 (Alpha = 0)
     memset(pBits, 0, IND_W * IND_H * 4);
-
-    // 2. 绘制彩色圆圈
     HBRUSH hBr = CreateSolidBrush(clr);
     HGDIOBJ hOldBr = SelectObject(hdcMem, hBr);
     HPEN hPen = CreatePen(PS_SOLID, 1, clr);
@@ -123,7 +139,6 @@ void Render(void) {
     
     Ellipse(hdcMem, 0, 0, IND_W - 1, IND_H - 1);
 
-    // 3. 绘制文字
     SetBkMode(hdcMem, TRANSPARENT);
     SetTextColor(hdcMem, RGB(255, 255, 255));
     HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 
@@ -134,21 +149,16 @@ void Render(void) {
     WCHAR s[2] = { ch, 0 };
     DrawTextW(hdcMem, s, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // 4. 修复 Alpha 通道
     LPDWORD pdw = (LPDWORD)pBits;
     for (int i = 0; i < IND_W * IND_H; i++) {
-        if (pdw[i] != 0) {
-            pdw[i] |= 0xFF000000; 
-        }
+        if (pdw[i] != 0) pdw[i] |= 0xFF000000; 
     }
 
-    // 5. 更新分层窗口
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     POINT ptSrc = {0, 0};
     SIZE szWin = { IND_W, IND_H };
     UpdateLayeredWindow(g_hwnd, hdcScreen, &pt, &szWin, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
 
-    // 清理资源
     SelectObject(hdcMem, hOldFont); DeleteObject(hFont);
     SelectObject(hdcMem, hOldPen); DeleteObject(hPen);
     SelectObject(hdcMem, hOldBr); DeleteObject(hBr);
@@ -180,7 +190,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"英文状态：蓝底白字 E；\n"
                 L"中文状态：橙底白字 C；\n"
                 L"大写锁定：绿底白字 A；\n\n"
-                L"修正了光标跟随逻辑。By LC 2026.1.6", 
+                L"修复了多屏幕DPI导致的状态丢失问题。By LC 2026.1.6", 
                 L"关于 IME Indicator", 
                 MB_OK | MB_ICONINFORMATION);
         }
@@ -198,15 +208,15 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    SetProcessDPIAware(); 
+    // 启用 Per-Monitor V2 DPI 感知，修复多屏漂移问题
+    EnableDeepDPI(); 
 
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"IME_V5_CLASS";
+    wc.lpszClassName = L"IME_V5_DPI_FIX";
     RegisterClassExW(&wc);
 
-    // 窗口属性：NOACTIVATE (不夺取焦点), TRANSPARENT (鼠标穿透)
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                              wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
@@ -220,7 +230,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    SetTimer(g_hwnd, 1, 15, NULL); // 约 60FPS 刷新
+    SetTimer(g_hwnd, 1, 15, NULL); 
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
