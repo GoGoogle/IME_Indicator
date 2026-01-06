@@ -36,6 +36,7 @@ WCHAR QueryState(COLORREF* clr) {
     HWND ime = fg ? ImmGetDefaultIMEWnd(fg) : NULL;
     DWORD_PTR open = 0, mode = 0;
     if (ime) {
+        // 使用更短的超时，避免卡顿
         if (SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 10, &open) && open) {
             SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 10, &mode);
         }
@@ -48,34 +49,48 @@ WCHAR QueryState(COLORREF* clr) {
     return L'E';
 }
 
-/* ---------------- 渲染核心 (精准坐标版) ---------------- */
+/* ---------------- 渲染核心 (只修订了坐标逻辑) ---------------- */
 void Render(void) {
-    POINT pt;
+    POINT pt = {0};
     GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
-    BOOL useCaret = FALSE;
+    BOOL bHasCaret = FALSE;
     
+    // --- 坐标获取逻辑修正开始 ---
     if (fg) {
         DWORD tid = GetWindowThreadProcessId(fg, NULL);
+        // 获取前台线程 GUI 信息
         if (GetGUIThreadInfo(tid, &gti)) {
-            // 判定输入状态：有光标句柄且矩形有效
+            // 1. 必须有光标句柄
+            // 2. 光标必须有高度 (排除隐形光标)
             if (gti.hwndCaret && (gti.rcCaret.bottom - gti.rcCaret.top > 0)) {
                 POINT caretPt = { gti.rcCaret.left, gti.rcCaret.bottom };
                 ClientToScreen(gti.hwndCaret, &caretPt);
                 
-                if (caretPt.x > 0 || caretPt.y > 0) {
+                // 3. 坐标必须在屏幕可见区域内 (排除 (0,0) 异常点)
+                if (caretPt.x > 0 && caretPt.y > 0) {
                     int caretWidth = gti.rcCaret.right - gti.rcCaret.left;
+                    
+                    // 修正：居中对齐
+                    // 指示器X = 光标X + (光标宽/2) - (指示器宽/2)
                     pt.x = caretPt.x + (caretWidth / 2) - (IND_W / 2);
-                    pt.y = caretPt.y + 10; 
-                    useCaret = TRUE;
+                    
+                    // 修正：垂直偏移
+                    // 紧贴光标底部再向下 2 像素
+                    pt.y = caretPt.y + 2; 
+                    
+                    bHasCaret = TRUE;
                 }
             }
         }
     }
+    // --- 坐标获取逻辑修正结束 ---
 
-    if (!useCaret) {
+    // 如果没抓到有效光标，回退到鼠标跟随
+    if (!bHasCaret) {
         GetCursorPos(&pt);
-        pt.x += 25; pt.y += 25;
+        pt.x += 25; // 鼠标右侧
+        pt.y += 25; // 鼠标下方
     }
 
     COLORREF clr;
@@ -83,6 +98,8 @@ void Render(void) {
 
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    
+    // 创建 32 位 DIB 位图
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = IND_W;
@@ -95,13 +112,18 @@ void Render(void) {
     HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
 
+    // 1. 清空背景为透明 (Alpha = 0)
     memset(pBits, 0, IND_W * IND_H * 4);
+
+    // 2. 绘制彩色圆圈
     HBRUSH hBr = CreateSolidBrush(clr);
     HGDIOBJ hOldBr = SelectObject(hdcMem, hBr);
     HPEN hPen = CreatePen(PS_SOLID, 1, clr);
     HGDIOBJ hOldPen = SelectObject(hdcMem, hPen);
+    
     Ellipse(hdcMem, 0, 0, IND_W - 1, IND_H - 1);
 
+    // 3. 绘制文字
     SetBkMode(hdcMem, TRANSPARENT);
     SetTextColor(hdcMem, RGB(255, 255, 255));
     HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 
@@ -112,21 +134,27 @@ void Render(void) {
     WCHAR s[2] = { ch, 0 };
     DrawTextW(hdcMem, s, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+    // 4. 修复 Alpha 通道
     LPDWORD pdw = (LPDWORD)pBits;
     for (int i = 0; i < IND_W * IND_H; i++) {
-        if (pdw[i] != 0) pdw[i] |= 0xFF000000; 
+        if (pdw[i] != 0) {
+            pdw[i] |= 0xFF000000; 
+        }
     }
 
+    // 5. 更新分层窗口
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     POINT ptSrc = {0, 0};
     SIZE szWin = { IND_W, IND_H };
     UpdateLayeredWindow(g_hwnd, hdcScreen, &pt, &szWin, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
 
+    // 清理资源
     SelectObject(hdcMem, hOldFont); DeleteObject(hFont);
     SelectObject(hdcMem, hOldPen); DeleteObject(hPen);
     SelectObject(hdcMem, hOldBr); DeleteObject(hBr);
     SelectObject(hdcMem, hOldBmp); DeleteObject(hBmp);
-    DeleteDC(hdcMem); ReleaseDC(NULL, hdcScreen);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
 }
 
 /* ---------------- 窗口逻辑 ---------------- */
@@ -136,18 +164,30 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_STRING, ID_ABOUT, L"关于 (About)");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, ID_EXIT, L"退出 (Exit)");
+        
         POINT p; GetCursorPos(&p);
         SetForegroundWindow(h);
         TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
         DestroyMenu(menu);
         return 0;
     }
+    
     if (m == WM_COMMAND) {
         if (LOWORD(w) == ID_ABOUT) {
-            MessageBoxW(h, L"功能如下：\n在光标和鼠标底部用彩色带字母的小圆点指示中、英及大写状态\n\n英文状态：蓝底白字 E；\n中文状态：橙底白字 C；\n大写锁定：绿底白字 A；", L"关于 IME Indicator", MB_OK | MB_ICONINFORMATION);
-        } else if (LOWORD(w) == ID_EXIT) {
+            MessageBoxW(h, 
+                L"输入指示器 (IME Indicator)功能如下：\n"
+                L"在光标和鼠标底部用彩色带字母的小圆点指示中、英及大写状态\n\n"
+                L"英文状态：蓝底白字 E；\n"
+                L"中文状态：橙底白字 C；\n"
+                L"大写锁定：绿底白字 A；\n\n"
+                L"修正了光标跟随逻辑。By LC 2026.1.6", 
+                L"关于 IME Indicator", 
+                MB_OK | MB_ICONINFORMATION);
+        }
+        else if (LOWORD(w) == ID_EXIT) {
             DestroyWindow(h);
         }
+        return 0;
     }
     if (m == WM_TIMER) Render();
     if (m == WM_DESTROY) {
@@ -159,12 +199,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     SetProcessDPIAware(); 
+
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"IME_V5_FINAL";
+    wc.lpszClassName = L"IME_V5_CLASS";
     RegisterClassExW(&wc);
 
+    // 窗口属性：NOACTIVATE (不夺取焦点), TRANSPARENT (鼠标穿透)
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                              wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
@@ -178,7 +220,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    SetTimer(g_hwnd, 1, 15, NULL); 
+    SetTimer(g_hwnd, 1, 15, NULL); // 约 60FPS 刷新
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
