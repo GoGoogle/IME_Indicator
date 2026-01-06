@@ -157,7 +157,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"英文状态：蓝底白字 E；\n"
                 L"中文状态：橙底白字 C；\n"
                 L"大写锁定：绿底白字 A；\n\n"
-                L"在某些程序内状态指示坐标仍旧不正常，不知道怎么修复，先这样用吧。；", 
+                L"在某些程序内指示状态的坐标仍旧不正常，不知道怎么修复，先这样用吧。By LC 2026.1.6", 
                 L"关于 IME Indicator", 
                 MB_OK | MB_ICONINFORMATION);
         }
