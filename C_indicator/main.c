@@ -31,10 +31,8 @@
 static HWND g_hwnd;
 static NOTIFYICONDATAW g_nid;
 
-/* ---------------- 深度 DPI 启用逻辑 (新增修复) ---------------- */
+/* ---------------- 深度 DPI 启用逻辑 ---------------- */
 void EnableDeepDPI(void) {
-    // 尝试调用 SetProcessDpiAwarenessContext (Win10 1607+)
-    // 这是解决多屏 DPI 坐标漂移/失效的终极方案
     HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
     if (hUser32) {
         typedef BOOL (WINAPI * SetProcessDpiAwarenessContextProc)(DPI_AWARENESS_CONTEXT);
@@ -42,13 +40,10 @@ void EnableDeepDPI(void) {
             (SetProcessDpiAwarenessContextProc)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
         
         if (setDpiAwareness) {
-            // 启用 Per-Monitor V2 感知
-            if (setDpiAwareness(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
-                return;
-            }
+            setDpiAwareness(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            return;
         }
     }
-    // 如果系统太老不支持 V2，回退到普通感知
     SetProcessDPIAware();
 }
 
@@ -74,7 +69,7 @@ WCHAR QueryState(COLORREF* clr) {
     return L'E';
 }
 
-/* ---------------- 渲染核心 ---------------- */
+/* ---------------- 渲染核心 (多屏坐标修复版) ---------------- */
 void Render(void) {
     POINT pt = {0};
     GUITHREADINFO gti = { sizeof(gti) };
@@ -84,22 +79,20 @@ void Render(void) {
     if (fg) {
         DWORD tid = GetWindowThreadProcessId(fg, NULL);
         if (GetGUIThreadInfo(tid, &gti)) {
-            // 必须有光标句柄且高度有效
+            // 必须有光标句柄且高度有效 (排除隐形光标)
             if (gti.hwndCaret && (gti.rcCaret.bottom - gti.rcCaret.top > 0)) {
                 POINT caretPt = { gti.rcCaret.left, gti.rcCaret.bottom };
-                
-                // 关键：在 Per-Monitor V2 模式下，ClientToScreen 会返回准确的物理像素坐标
-                // 无论窗口在哪个屏幕，都不会发生漂移
                 ClientToScreen(gti.hwndCaret, &caretPt);
                 
-                // 排除 (0,0) 异常
-                if (caretPt.x > 0 && caretPt.y > 0) {
+                // 【核心修复】这里删除了 caretPt.x > 0 的判断
+                // 改为检查该坐标是否位于任意有效显示器内
+                HMONITOR hMon = MonitorFromPoint(caretPt, MONITOR_DEFAULTTONULL);
+                
+                // 只有当坐标确实落在某个显示器内时，才认为是有效光标
+                if (hMon != NULL) {
                     int caretWidth = gti.rcCaret.right - gti.rcCaret.left;
-                    
-                    // 居中对齐逻辑
                     pt.x = caretPt.x + (caretWidth / 2) - (IND_W / 2);
                     pt.y = caretPt.y + 2; 
-                    
                     bHasCaret = TRUE;
                 }
             }
@@ -109,8 +102,8 @@ void Render(void) {
     // 回退到鼠标跟随
     if (!bHasCaret) {
         GetCursorPos(&pt);
-        pt.x += 25; 
-        pt.y += 25; 
+        pt.x += 20; 
+        pt.y += 20; 
     }
 
     COLORREF clr;
@@ -190,7 +183,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"英文状态：蓝底白字 E；\n"
                 L"中文状态：橙底白字 C；\n"
                 L"大写锁定：绿底白字 A；\n\n"
-                L"修复了多屏幕DPI导致的状态丢失问题。By LC 2026.1.6", 
+                L"修复了多显示器(负坐标)光标失效的Bug。By LC 2026.1.6", 
                 L"关于 IME Indicator", 
                 MB_OK | MB_ICONINFORMATION);
         }
@@ -208,13 +201,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // 启用 Per-Monitor V2 DPI 感知，修复多屏漂移问题
     EnableDeepDPI(); 
 
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"IME_V5_DPI_FIX";
+    wc.lpszClassName = L"IME_V5_MULTIMON";
     RegisterClassExW(&wc);
 
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
