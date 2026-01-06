@@ -1,57 +1,3 @@
-//可用版本
-
-#define UNICODE
-#define _UNICODE
-#define WIN32_LEAN_AND_MEAN
-
-#include <windows.h>
-#include <imm.h>
-#include <shellapi.h>
-
-#pragma comment(lib,"user32.lib")
-#pragma comment(lib,"gdi32.lib")
-#pragma comment(lib,"imm32.lib")
-#pragma comment(lib,"shell32.lib")
-
-#define IND_W 24
-#define IND_H 24
-
-// 颜色定义 (BGR 格式)
-#define COLOR_CN   0x000078FF // 橙色
-#define COLOR_EN   0x00FF7800 // 蓝色
-#define COLOR_CAPS 0x0000C800 // 绿色
-
-#define WM_TRAYICON (WM_USER + 1)
-#define ID_ABOUT    1001
-#define ID_EXIT     1002
-
-static HWND g_hwnd;
-static NOTIFYICONDATAW g_nid;
-
-/* ---------------- 状态查询 ---------------- */
-WCHAR QueryState(COLORREF* clr) {
-    if (GetKeyState(VK_CAPITAL) & 1) {
-        *clr = COLOR_CAPS;
-        return L'A';
-    }
-    HWND fg = GetForegroundWindow();
-    HWND ime = fg ? ImmGetDefaultIMEWnd(fg) : NULL;
-    DWORD_PTR open = 0, mode = 0;
-    if (ime) {
-        // 使用更短的超时，避免卡顿
-        if (SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 10, &open) && open) {
-            SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 10, &mode);
-        }
-    }
-    if (open && (mode & 1)) {
-        *clr = COLOR_CN;
-        return L'C';
-    }
-    *clr = COLOR_EN;
-    return L'E';
-}
-
-/* ---------------- 渲染核心 (深度修订版) ---------------- */
 #define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
@@ -182,6 +128,7 @@ void Render(void) {
     SelectObject(hdcMem, hOldBmp); DeleteObject(hBmp);
     DeleteDC(hdcMem); ReleaseDC(NULL, hdcScreen);
 }
+
 /* ---------------- 窗口逻辑 ---------------- */
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && (l == WM_RBUTTONUP || l == WM_LBUTTONUP)) {
@@ -189,30 +136,18 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_STRING, ID_ABOUT, L"关于 (About)");
         AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(menu, MF_STRING, ID_EXIT, L"退出 (Exit)");
-        
         POINT p; GetCursorPos(&p);
         SetForegroundWindow(h);
         TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
         DestroyMenu(menu);
         return 0;
     }
-    
     if (m == WM_COMMAND) {
         if (LOWORD(w) == ID_ABOUT) {
-            MessageBoxW(h, 
-                L"输入指示器 (IME Indicator)功能如下：\n"
-                L"在光标和鼠标底部用彩色带字母的小圆点指示中、英及大写状态\n\n"
-                L"英文状态：蓝底白字 E；\n"
-                L"中文状态：橙底白字 C；\n"
-                L"大写锁定：绿底白字 A；\n\n"
-                L"在某些程序内指示状态的坐标仍旧不正常，不知道怎么修复，先这样用吧。By LC 2026.1.6", 
-                L"关于 IME Indicator", 
-                MB_OK | MB_ICONINFORMATION);
-        }
-        else if (LOWORD(w) == ID_EXIT) {
+            MessageBoxW(h, L"功能如下：\n在光标和鼠标底部用彩色带字母的小圆点指示中、英及大写状态\n\n英文状态：蓝底白字 E；\n中文状态：橙底白字 C；\n大写锁定：绿底白字 A；", L"关于 IME Indicator", MB_OK | MB_ICONINFORMATION);
+        } else if (LOWORD(w) == ID_EXIT) {
             DestroyWindow(h);
         }
-        return 0;
     }
     if (m == WM_TIMER) Render();
     if (m == WM_DESTROY) {
@@ -224,14 +159,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     SetProcessDPIAware(); 
-
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"IME_V5_CLASS";
+    wc.lpszClassName = L"IME_V5_FINAL";
     RegisterClassExW(&wc);
 
-    // 窗口属性：NOACTIVATE (不夺取焦点), TRANSPARENT (鼠标穿透)
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                              wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hInstance, NULL);
 
@@ -245,7 +178,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    SetTimer(g_hwnd, 1, 15, NULL); // 约 60FPS 刷新
+    SetTimer(g_hwnd, 1, 15, NULL); 
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
