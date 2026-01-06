@@ -64,7 +64,7 @@ void Render(void) {
         pt.x += 0; pt.y += 10; // 稍微偏移避开光标
     } else {
         GetCursorPos(&pt);
-        pt.x += 18; pt.y += 20;
+        pt.x += 25; pt.y += 25;
     }
 
     COLORREF clr;
