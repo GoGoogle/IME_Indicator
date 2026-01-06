@@ -5,185 +5,230 @@
 #include <windows.h>
 #include <imm.h>
 #include <shellapi.h>
-#include <ole2.h>
-
-/* ---------- GDI+ minimal ---------- */
-typedef float REAL;
-typedef UINT32 ARGB;
-typedef enum { SmoothingModeAntiAlias = 4 } SmoothingMode;
-typedef void GpGraphics;
-typedef void GpBrush;
-typedef void GpSolidFill;
-
-struct GdiplusStartupInput {
-    UINT32 GdiplusVersion;
-    void* DebugEventCallback;
-    BOOL SuppressBackgroundThread;
-    BOOL SuppressExternalCodecs;
-};
-
-__declspec(dllimport) int  __stdcall GdiplusStartup(ULONG_PTR*, const struct GdiplusStartupInput*, void*);
-__declspec(dllimport) void __stdcall GdiplusShutdown(ULONG_PTR);
-__declspec(dllimport) int  __stdcall GdipCreateFromHDC(HDC, GpGraphics**);
-__declspec(dllimport) int  __stdcall GdipDeleteGraphics(GpGraphics*);
-__declspec(dllimport) int  __stdcall GdipSetSmoothingMode(GpGraphics*, SmoothingMode);
-__declspec(dllimport) int  __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
-__declspec(dllimport) int  __stdcall GdipDeleteBrush(GpBrush*);
-__declspec(dllimport) int  __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
 
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
-#pragma comment(lib,"gdiplus.lib")
 #pragma comment(lib,"imm32.lib")
-#pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"shell32.lib")
 
-/* ---------- config ---------- */
-#define INDICATOR_SIZE 12
-#define COLOR_CN   0xA0FF7800
-#define COLOR_EN   0x300078FF
-#define COLOR_CAPS 0xA000FF00
+#define IND_W 18
+#define IND_H 18
 
-#define WM_TRAYICON (WM_USER + 100)
+#define COLOR_CN   RGB(255,120,0)
+#define COLOR_EN   RGB(0,120,255)
+#define COLOR_CAPS RGB(0,200,0)
+
+#define WM_TRAYICON (WM_USER + 1)
 #define ID_EXIT     1
 
-HWND g_hwnd;
-ULONG_PTR g_gdiplus;
-NOTIFYICONDATAW g_nid;
+static HWND g_hwnd;
+static NOTIFYICONDATAW g_nid;
 
-POINT g_lastPt = { -1, -1 };
-UINT  g_lastColor = 0;
+static POINT     g_lastPt   = { -1,-1 };
+static WCHAR     g_lastCh   = 0;
+static COLORREF  g_lastClr  = 0;
 
-/* ---------- IME state ---------- */
-UINT GetImeColor(void) {
+/* ---------------- DPI ---------------- */
+
+void EnableDPI(void) {
+    HMODULE u32 = GetModuleHandleW(L"user32.dll");
+    if (u32) {
+        typedef BOOL (WINAPI *P)(DPI_AWARENESS_CONTEXT);
+        P fn = (P)GetProcAddress(u32, "SetProcessDpiAwarenessContext");
+        if (fn) fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+/* ---------------- state ---------------- */
+
+WCHAR QueryStateChar(COLORREF* clr) {
+    if (GetKeyState(VK_CAPITAL) & 1) {
+        *clr = COLOR_CAPS;
+        return L'A';
+    }
+
     HWND fg = GetForegroundWindow();
-    BOOL cn = FALSE;
+    HWND ime = fg ? ImmGetDefaultIMEWnd(fg) : NULL;
 
-    if (fg) {
-        HWND ime = ImmGetDefaultIMEWnd(fg);
-        DWORD_PTR open = 0, mode = 0;
-        SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 20, &open);
+    DWORD_PTR open = 0, mode = 0;
+    if (ime) {
+        SendMessageTimeoutW(ime, 0x0283, 0x005, 0,
+            SMTO_ABORTIFHUNG, 20, &open);
         if (open) {
-            SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 20, &mode);
-            cn = (mode & 1);
+            SendMessageTimeoutW(ime, 0x0283, 0x001, 0,
+                SMTO_ABORTIFHUNG, 20, &mode);
         }
     }
-    if (GetKeyState(VK_CAPITAL) & 1) return COLOR_CAPS;
-    return cn ? COLOR_CN : COLOR_EN;
-}
 
-/* ---------- caret ---------- */
-void GetCaretPos(POINT* pt) {
-    GUITHREADINFO gti = { sizeof(gti) };
-    HWND fg = GetForegroundWindow();
-
-    if (fg &&
-        GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti) &&
-        gti.hwndCaret) {
-
-        POINT p = { gti.rcCaret.left, gti.rcCaret.bottom };
-        ClientToScreen(gti.hwndCaret, &p);
-        *pt = p;
-        return;
+    if (open && (mode & 1)) {
+        *clr = COLOR_CN;
+        return L'C';
     }
 
-    GetCursorPos(pt);
-    pt->y += 18;
+    *clr = COLOR_EN;
+    return L'E';
 }
 
-/* ---------- render ---------- */
-void Render(POINT pt, UINT color) {
-    if (pt.x == g_lastPt.x && pt.y == g_lastPt.y && color == g_lastColor)
+/* ---------------- caret ---------------- */
+
+BOOL QueryCaretScreenPos(POINT* pt) {
+    GUITHREADINFO gti = { sizeof(gti) };
+    HWND fg = GetForegroundWindow();
+    if (!fg) return FALSE;
+
+    if (!GetGUIThreadInfo(
+        GetWindowThreadProcessId(fg, NULL), &gti))
+        return FALSE;
+
+    if (!gti.hwndCaret)
+        return FALSE;
+
+    POINT p = { gti.rcCaret.left, gti.rcCaret.bottom };
+    ClientToScreen(gti.hwndCaret, &p);
+    *pt = p;
+    return TRUE;
+}
+
+/* ---------------- clamp ---------------- */
+
+void ClampToMonitor(POINT* pt) {
+    HMONITOR mon = MonitorFromPoint(*pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(mon, &mi);
+
+    if (pt->x + IND_W > mi.rcWork.right)
+        pt->x = mi.rcWork.right - IND_W;
+    if (pt->y + IND_H > mi.rcWork.bottom)
+        pt->y = mi.rcWork.bottom - IND_H;
+    if (pt->x < mi.rcWork.left)
+        pt->x = mi.rcWork.left;
+    if (pt->y < mi.rcWork.top)
+        pt->y = mi.rcWork.top;
+}
+
+/* ---------------- render ---------------- */
+
+void Render(POINT pt, WCHAR ch, COLORREF clr) {
+    if (pt.x == g_lastPt.x &&
+        pt.y == g_lastPt.y &&
+        ch   == g_lastCh &&
+        clr  == g_lastClr)
         return;
 
-    g_lastPt = pt;
-    g_lastColor = color;
+    g_lastPt  = pt;
+    g_lastCh  = ch;
+    g_lastClr = clr;
 
     HDC hdc = GetDC(NULL);
     HDC mdc = CreateCompatibleDC(hdc);
 
-    BITMAPINFO bi = { 0 };
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = INDICATOR_SIZE;
-    bi.bmiHeader.biHeight = INDICATOR_SIZE;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-
-    void* bits;
-    HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, IND_W, IND_H);
     HGDIOBJ old = SelectObject(mdc, bmp);
 
-    GpGraphics* g;
-    GpSolidFill* b;
-    GdipCreateFromHDC(mdc, &g);
-    GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-    GdipCreateSolidFill(color, &b);
-    GdipFillEllipse(g, b, 0, 0, INDICATOR_SIZE, INDICATOR_SIZE);
+    HBRUSH bg = CreateSolidBrush(RGB(0,0,0));
+    RECT r = {0,0,IND_W,IND_H};
+    FillRect(mdc, &r, bg);
+    DeleteObject(bg);
 
-    SIZE sz = { INDICATOR_SIZE, INDICATOR_SIZE };
-    POINT src = { 0,0 };
+    SetBkMode(mdc, TRANSPARENT);
+    SetTextColor(mdc, clr);
+
+    HFONT font = CreateFontW(
+        -12,0,0,0,FW_BOLD,0,0,0,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,
+        DEFAULT_PITCH,L"Segoe UI");
+
+    HGDIOBJ oldf = SelectObject(mdc, font);
+    WCHAR s[2] = { ch, 0 };
+    DrawTextW(mdc, s, 1, &r,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(mdc, oldf);
+    DeleteObject(font);
+
+    SIZE sz = { IND_W, IND_H };
+    POINT src = {0,0};
     BLENDFUNCTION bf = { AC_SRC_OVER,0,255,AC_SRC_ALPHA };
-    UpdateLayeredWindow(g_hwnd, hdc, &pt, &sz, mdc, &src, 0, &bf, ULW_ALPHA);
 
-    GdipDeleteBrush(b);
-    GdipDeleteGraphics(g);
+    UpdateLayeredWindow(
+        g_hwnd, hdc, &pt, &sz,
+        mdc, &src, 0, &bf, ULW_ALPHA);
+
     SelectObject(mdc, old);
     DeleteObject(bmp);
     DeleteDC(mdc);
     ReleaseDC(NULL, hdc);
 }
 
-/* ---------- WinEvent ---------- */
+/* ---------------- WinEvent ---------------- */
+
 void CALLBACK WinEventProc(
-    HWINEVENTHOOK h, DWORD e, HWND hwnd,
-    LONG idObj, LONG idChild,
-    DWORD tid, DWORD time) {
+    HWINEVENTHOOK,
+    DWORD,
+    HWND,
+    LONG,
+    LONG,
+    DWORD,
+    DWORD) {
 
     POINT pt;
-    GetCaretPos(&pt);
-    Render(pt, GetImeColor());
+    if (!QueryCaretScreenPos(&pt)) {
+        GetCursorPos(&pt);
+        pt.y += 16;
+    }
+
+    ClampToMonitor(&pt);
+
+    COLORREF clr;
+    WCHAR ch = QueryStateChar(&clr);
+    Render(pt, ch, clr);
 }
 
-/* ---------- window ---------- */
+/* ---------------- window ---------------- */
+
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && l == WM_RBUTTONUP) {
-        HMENU mnu = CreatePopupMenu();
-        AppendMenuW(mnu, MF_STRING, ID_EXIT, L"Exit");
+        HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, ID_EXIT, L"Exit");
         POINT p; GetCursorPos(&p);
         SetForegroundWindow(h);
-        TrackPopupMenu(mnu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
-        DestroyMenu(mnu);
+        TrackPopupMenu(menu, TPM_RIGHTBUTTON,
+            p.x, p.y, 0, h, NULL);
+        DestroyMenu(menu);
         return 0;
     }
+
     if (m == WM_COMMAND && LOWORD(w) == ID_EXIT) {
         DestroyWindow(h);
         return 0;
     }
+
     if (m == WM_DESTROY) {
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
     }
+
     return DefWindowProcW(h, m, w, l);
 }
 
-/* ---------- entry ---------- */
+/* ---------------- entry ---------------- */
+
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
-    CoInitialize(NULL);
+    EnableDPI();
 
-    struct GdiplusStartupInput si = { 1 };
-    GdiplusStartup(&g_gdiplus, &si, NULL);
-
-    WNDCLASSEXW wc = { sizeof(wc),0,WndProc,0,0,hi };
-    wc.lpszClassName = L"IME_IND";
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hi;
+    wc.lpszClassName = L"IME_IND_C";
     RegisterClassExW(&wc);
 
     g_hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
-        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        WS_EX_LAYERED | WS_EX_TOPMOST |
+        WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
         wc.lpszClassName, L"",
-        WS_POPUP, 0, 0, 0, 0,
-        NULL, NULL, hi, NULL);
+        WS_POPUP, 0,0,0,0,
+        NULL,NULL,hi,NULL);
 
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = g_hwnd;
@@ -193,17 +238,19 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
-    SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE,
-        NULL, WinEventProc, 0, 0,
-        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    SetWinEventHook(
+        EVENT_OBJECT_FOCUS,
+        EVENT_OBJECT_LOCATIONCHANGE,
+        NULL,
+        WinEventProc,
+        0,0,
+        WINEVENT_OUTOFCONTEXT |
+        WINEVENT_SKIPOWNPROCESS);
 
     MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
+    while (GetMessageW(&msg,NULL,0,0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-
-    GdiplusShutdown(g_gdiplus);
-    CoUninitialize();
     return 0;
 }
