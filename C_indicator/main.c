@@ -22,7 +22,8 @@
 #define COLOR_CAPS 0x0000C800 // 绿色
 
 #define WM_TRAYICON (WM_USER + 1)
-#define ID_EXIT     1
+#define ID_ABOUT    1001
+#define ID_EXIT     1002
 
 static HWND g_hwnd;
 static NOTIFYICONDATAW g_nid;
@@ -137,14 +138,34 @@ void Render(void) {
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && (l == WM_RBUTTONUP || l == WM_LBUTTONUP)) {
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, ID_EXIT, L"\u9000\u51fa (Exit)");
+        AppendMenuW(menu, MF_STRING, ID_ABOUT, L"关于 (About)");
+        AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(menu, MF_STRING, ID_EXIT, L"退出 (Exit)");
+        
         POINT p; GetCursorPos(&p);
         SetForegroundWindow(h);
         TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
         DestroyMenu(menu);
         return 0;
     }
-    if (m == WM_COMMAND && LOWORD(w) == ID_EXIT) DestroyWindow(h);
+    
+    if (m == WM_COMMAND) {
+        if (LOWORD(w) == ID_ABOUT) {
+            MessageBoxW(h, 
+                L"输入指示器 (IME Indicator)功能如下：\n"
+                L"在光标和鼠标底部用彩色带字母的小圆点指示中、英及大写状态\n\n"
+                L"英文状态：蓝底白字 E；\n"
+                L"中文状态：橙底白字 C；\n"
+                L"大写锁定：绿底白字 A；\n\n"
+                L"在某些程序内状态指示坐标仍旧不正常，不知道怎么修复，先这样用吧。；", 
+                L"关于 IME Indicator", 
+                MB_OK | MB_ICONINFORMATION);
+        }
+        else if (LOWORD(w) == ID_EXIT) {
+            DestroyWindow(h);
+        }
+        return 0;
+    }
     if (m == WM_TIMER) Render();
     if (m == WM_DESTROY) {
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
