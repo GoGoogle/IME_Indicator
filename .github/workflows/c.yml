@@ -43,7 +43,8 @@ jobs:
         英文状态：蓝底白字 E；\n
         中文状态：橙底白字 C；\n
         大写锁定：绿底白字 A；\n
-        只包括一个退出按钮，且在Windows10上测试通过。"
+        只包括一个退出按钮，且在Windows10上测试通过。
+        ![chrome_D8MZao46jO](https://github.com/user-attachments/assets/219ad41a-c408-4126-81b8-981b0fd25e6e)"
         # --- 关键修改点 3：这里的路径也要对应 ---
         files: ./C_indicator/IME-Indicator-C.exe
       env:
