@@ -3,7 +3,7 @@ name: C Build and Release (Robust)
 on:
   push:
     tags:
-      - 'v*'
+      - 'C_v*'
   workflow_dispatch:
 
 jobs:
