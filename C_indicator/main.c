@@ -54,19 +54,9 @@ WCHAR QueryState(COLORREF* clr) {
 /* ---------------- 渲染核心 ---------------- */
 void Render(void) {
     POINT pt;
-    GUITHREADINFO gti = { sizeof(gti) };
-    HWND fg = GetForegroundWindow();
-    
-    // 优先获取光标位置
-    if (fg && GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti) && gti.hwndCaret) {
-        pt.x = gti.rcCaret.left;
-        pt.y = gti.rcCaret.bottom;
-        ClientToScreen(gti.hwndCaret, &pt);
-        pt.x += 0; pt.y += 10; // 稍微偏移避开光标
-    } else {
-        GetCursorPos(&pt);
-        pt.x += 25; pt.y += 25;
-    }
+    GetCursorPos(&pt);
+    pt.x += 25;
+    pt.y += 25;
 
     COLORREF clr;
     WCHAR ch = QueryState(&clr);
