@@ -5,9 +5,10 @@
 #include <windows.h>
 #include <imm.h>
 #include <shellapi.h>
-#include <oleacc.h> // 必须包含这个处理辅助对象的头文件
+#include <ole2.h>
+#include <uiautomation.h>
 
-// --- GDI+ 极简声明 ---
+// --- GDI+ 极简平面 API 声明 ---
 typedef float REAL;
 typedef UINT32 ARGB;
 typedef enum { SmoothingModeAntiAlias = 4 } SmoothingMode;
@@ -37,49 +38,58 @@ __declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL,
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "oleacc.lib") // 链接辅助库
+#pragma comment(lib, "ole32.lib")
 
 HWND g_hwnd;
 ULONG_PTR g_token;
 NOTIFYICONDATAW g_nid = {0};
+IUIAutomation* g_pAutomation = NULL;
 
-// --- 安全的状态获取 ---
+// --- 获取输入法状态颜色 ---
 void GetState(unsigned int* color) {
     HWND fore = GetForegroundWindow();
     BOOL cn = FALSE;
     if (fore) {
         HWND ime = ImmGetDefaultIMEWnd(fore);
-        if (ime) {
-            DWORD_PTR open = 0;
-            if (SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x005, 0, SMTO_ABORTIFHUNG, 20, &open) && open) {
-                DWORD_PTR mode = 0;
-                SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x001, 0, SMTO_ABORTIFHUNG, 20, &mode);
-                cn = (mode & 1);
-            }
+        DWORD_PTR open = 0;
+        if (SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 20, &open) && open) {
+            DWORD_PTR mode = 0;
+            SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 20, &mode);
+            cn = (mode & 1);
         }
     }
     *color = (GetKeyState(VK_CAPITAL) & 1) ? COLOR_CAPS : (cn ? COLOR_CN : COLOR_EN);
 }
 
-// --- 核心修复：只读探测光标，绝不抢焦点 ---
+// --- 核心：多层探测光标位置 ---
 void GetTargetPos(POINT* pt) {
+    // 1. 尝试标准 Win32 光标 (记事本等)
     GUITHREADINFO gti = { sizeof(GUITHREADINFO) };
-    HWND fore = GetForegroundWindow();
-    DWORD tid = GetWindowThreadProcessId(fore, NULL);
-
-    // 优先尝试标准 Caret (无需 AttachThreadInput)
-    if (GetGUIThreadInfo(tid, &gti) && gti.hwndCaret) {
+    if (GetGUIThreadInfo(GetWindowThreadProcessId(GetForegroundWindow(), NULL), &gti) && gti.hwndCaret) {
         POINT cp = { gti.rcCaret.left, gti.rcCaret.bottom };
         ClientToScreen(gti.hwndCaret, &cp);
-        pt->x = cp.x + 2;
-        pt->y = cp.y + 2;
-        if (pt->x > 0 && pt->y > 0) return;
+        pt->x = cp.x + 2; pt->y = cp.y + 2;
+        if (pt->x > 5) return;
     }
 
-    // 回退到鼠标跟随
+    // 2. 尝试 UI Automation (Chrome, VS Code 等现代应用)
+    if (g_pAutomation) {
+        IUIAutomationElement* pEl = NULL;
+        if (SUCCEEDED(g_pAutomation->lpVtbl->GetFocusedElement(g_pAutomation, &pEl)) && pEl) {
+            RECT rect;
+            if (SUCCEEDED(pEl->lpVtbl->get_CurrentBoundingRectangle(pEl, &rect))) {
+                // 聚焦在文字元素上，我们取其底部
+                pt->x = rect.left; pt->y = rect.bottom;
+                pEl->lpVtbl->Release(pEl);
+                if (pt->x > 0) return;
+            }
+            pEl->lpVtbl->Release(pEl);
+        }
+    }
+
+    // 3. 最终回退到鼠标
     GetCursorPos(pt);
-    pt->x += 2;
-    pt->y += 20;
+    pt->x += 2; pt->y += 20;
 }
 
 void Render(POINT pt, unsigned int color) {
@@ -107,18 +117,15 @@ void Render(POINT pt, unsigned int color) {
 }
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_TRAYICON) {
-        if (l == WM_RBUTTONUP) {
-            POINT p; GetCursorPos(&p);
-            HMENU hMenu = CreatePopupMenu();
-            // 使用 Unicode 编码确保无乱码：退出 (Exit)
-            AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"\u9000\u51fa (Exit)");
-            SetForegroundWindow(h);
-            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
-            DestroyMenu(hMenu);
-        }
-    } else if (m == WM_COMMAND) {
-        if (LOWORD(w) == ID_TRAY_EXIT) DestroyWindow(h);
+    if (m == WM_TRAYICON && l == WM_RBUTTONUP) {
+        POINT p; GetCursorPos(&p);
+        HMENU hM = CreatePopupMenu();
+        AppendMenuW(hM, MF_STRING, ID_TRAY_EXIT, L"\u9000\u51fa (Exit)");
+        SetForegroundWindow(h);
+        TrackPopupMenu(hM, TPM_RIGHTBUTTON, p.x, p.y, 0, h, NULL);
+        DestroyMenu(hM);
+    } else if (m == WM_COMMAND && LOWORD(w) == ID_TRAY_EXIT) {
+        DestroyWindow(h);
     } else if (m == WM_DESTROY) {
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
@@ -127,6 +134,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR lp, int ns) {
+    CoInitialize(NULL);
+    CoCreateInstance(&CLSID_CUIAutomation, NULL, CLSCTX_INPROC_SERVER, &IID_IUIAutomation, (void**)&g_pAutomation);
+
     struct GdiplusStartupInput si = {1, NULL, FALSE, FALSE};
     GdiplusStartup(&g_token, &si, NULL);
 
@@ -135,30 +145,27 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR lp, int ns) {
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, 
                              L"IME_IND", L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hi, NULL);
 
-    g_nid.cbSize = sizeof(g_nid);
-    g_nid.hWnd = g_hwnd;
-    g_nid.uID = 1;
-    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.cbSize = sizeof(g_nid); g_nid.hWnd = g_hwnd; g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE; g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    wcscpy(g_nid.szTip, L"IME Indicator");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     ShowWindow(g_hwnd, SW_SHOW);
-
     MSG msg;
     while (1) {
-        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) goto cleanup;
+        if (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
-        POINT target; unsigned int color;
-        GetTargetPos(&target);
-        GetState(&color);
-        Render(target, color);
-        Sleep(20); // 降低频率，进一步减少干扰风险
+        POINT t; unsigned int c;
+        GetTargetPos(&t);
+        GetState(&c);
+        Render(t, c);
+        Sleep(15);
     }
-cleanup:
+
+    if (g_pAutomation) g_pAutomation->lpVtbl->Release(g_pAutomation);
+    CoUninitialize();
     GdiplusShutdown(g_token);
     return 0;
 }
