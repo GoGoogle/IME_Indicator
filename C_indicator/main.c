@@ -6,8 +6,8 @@
 #include <imm.h>
 #include <shellapi.h>
 
-// 核心修复：直接包含，不带文件夹前缀
-// 并且在包含之前强制指定 GDI+ 为 C 兼容模式
+// --- 关键修复：手动包含 GDI+ 平面接口定义 ---
+// 在纯 C 环境下，我们避开 gdiplus.h，直接引入基础定义
 #include <gdiplusflat.h> 
 
 // --- 配置区 ---
@@ -29,15 +29,13 @@ ULONG_PTR g_token;
 NOTIFYICONDATAW g_nid = {0};
 UINT g_uShellRestart;
 
-// ... (AddTrayIcon 和 GetState 函数保持不变) ...
-
 void AddTrayIcon(HWND hwnd) {
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = hwnd;
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_USER + 100;
-    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    g_nid.hIcon = LoadIcon(NULL, (LPCWSTR)IDI_APPLICATION);
     wcscpy(g_nid.szTip, L"IME Indicator (C)");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -76,6 +74,7 @@ void Render(int x, int y, unsigned int color) {
     HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     HGDIOBJ old = SelectObject(mdc, bmp);
 
+    // GDI+ 绘制逻辑
     GpGraphics* g;
     GpSolidFill* b;
     GdipCreateFromHDC(mdc, &g);
@@ -103,8 +102,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR lp, int ns) {
-    // 修复：显式使用结构体定义
-    struct GdiplusStartupInput si = {1, NULL, FALSE, FALSE};
+    // 强制适配 C 语言的启动结构体
+    struct GdiplusStartupInput si;
+    si.GdiplusVersion = 1;
+    si.DebugEventCallback = NULL;
+    si.SuppressBackgroundThread = FALSE;
+    si.SuppressExternalCodecs = FALSE;
+    
     GdiplusStartup(&g_token, &si, NULL);
     
     g_uShellRestart = RegisterWindowMessageW(L"TaskbarCreated");
