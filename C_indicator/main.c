@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <imm.h>
 #include <ole2.h>
+#include <oleauto.h>   /* ← 关键：SAFEARRAY */
 #include <uiautomation.h>
 #include <shellapi.h>
 
@@ -46,13 +47,13 @@ __declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL,
 #pragma comment(lib,"gdiplus.lib")
 #pragma comment(lib,"imm32.lib")
 #pragma comment(lib,"ole32.lib")
+#pragma comment(lib,"oleaut32.lib")
 #pragma comment(lib,"shell32.lib")
 
 /* ---------------- globals ---------------- */
 HWND g_hwnd;
 ULONG_PTR g_gdiplus;
 NOTIFYICONDATAW g_nid;
-
 IUIAutomation* g_uia = NULL;
 
 POINT g_lastPt = { -1,-1 };
@@ -76,33 +77,31 @@ UINT GetImeColor(void) {
     return cn ? COLOR_CN : COLOR_EN;
 }
 
-/* ---------------- caret via UIA TextPattern ---------------- */
+/* ---------------- caret via UIA TextPattern2 ---------------- */
 BOOL GetCaretFromUIA(POINT* pt) {
     IUIAutomationElement* el = NULL;
     if (FAILED(g_uia->lpVtbl->GetFocusedElement(g_uia, &el)) || !el)
         return FALSE;
 
     IUIAutomationTextPattern2* tp2 = NULL;
-    HRESULT hr = el->lpVtbl->GetCurrentPattern(
-        el, UIA_TextPattern2Id, (IUnknown**)&tp2);
-
-    if (FAILED(hr) || !tp2) {
+    if (FAILED(el->lpVtbl->GetCurrentPattern(
+        el, UIA_TextPattern2Id, (IUnknown**)&tp2)) || !tp2) {
         el->lpVtbl->Release(el);
         return FALSE;
     }
 
     IUIAutomationTextRange* range = NULL;
-    hr = tp2->lpVtbl->GetCaretRange(tp2, NULL, &range);
-    if (FAILED(hr) || !range) {
+    if (FAILED(tp2->lpVtbl->GetCaretRange(tp2, NULL, &range)) || !range) {
         tp2->lpVtbl->Release(tp2);
         el->lpVtbl->Release(el);
         return FALSE;
     }
 
     SAFEARRAY* rects = NULL;
-    hr = range->lpVtbl->GetBoundingRectangles(range, &rects);
-    if (SUCCEEDED(hr) && rects && rects->rgsabound[0].cElements >= 4) {
-        double* d;
+    if (SUCCEEDED(range->lpVtbl->GetBoundingRectangles(range, &rects)) &&
+        rects && rects->rgsabound[0].cElements >= 4) {
+
+        double* d = NULL;
         SafeArrayAccessData(rects, (void**)&d);
         pt->x = (LONG)d[0] + 2;
         pt->y = (LONG)(d[1] + d[3]) + 2;
