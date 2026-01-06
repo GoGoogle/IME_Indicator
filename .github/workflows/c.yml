@@ -21,8 +21,8 @@ jobs:
 
     - name: Compile
       # --- 关键修改点 1：指向你的子目录 ---
-      working-directory: ./C_indicator 
-      run: cl.exe /O2 /MT /Fe:IME-Indicator-C.exe main.c /link /SUBSYSTEM:WINDOWS
+      working-directory: ./C_indicator
+      run: cl.exe /O2 /MT /utf-8 /Fe:IME-Indicator-C.exe main.c /link /SUBSYSTEM:WINDOWS
 
     - name: Upload Artifact
       if: "!startsWith(github.ref, 'refs/tags/')"
