@@ -52,47 +52,91 @@ WCHAR QueryState(COLORREF* clr) {
 }
 
 /* ---------------- 渲染核心 (深度修订版) ---------------- */
+#define UNICODE
+#define _UNICODE
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <imm.h>
+#include <shellapi.h>
+
+#pragma comment(lib,"user32.lib")
+#pragma comment(lib,"gdi32.lib")
+#pragma comment(lib,"imm32.lib")
+#pragma comment(lib,"shell32.lib")
+
+#define IND_W 24
+#define IND_H 24
+
+// 颜色定义 (BGR 格式)
+#define COLOR_CN   0x000078FF // 橙色
+#define COLOR_EN   0x00FF7800 // 蓝色
+#define COLOR_CAPS 0x0000C800 // 绿色
+
+#define WM_TRAYICON (WM_USER + 1)
+#define ID_ABOUT    1001
+#define ID_EXIT     1002
+
+static HWND g_hwnd;
+static NOTIFYICONDATAW g_nid;
+
+/* ---------------- 状态查询 ---------------- */
+WCHAR QueryState(COLORREF* clr) {
+    if (GetKeyState(VK_CAPITAL) & 1) {
+        *clr = COLOR_CAPS;
+        return L'A';
+    }
+    HWND fg = GetForegroundWindow();
+    HWND ime = fg ? ImmGetDefaultIMEWnd(fg) : NULL;
+    DWORD_PTR open = 0, mode = 0;
+    if (ime) {
+        if (SendMessageTimeoutW(ime, 0x0283, 0x005, 0, SMTO_ABORTIFHUNG, 10, &open) && open) {
+            SendMessageTimeoutW(ime, 0x0283, 0x001, 0, SMTO_ABORTIFHUNG, 10, &mode);
+        }
+    }
+    if (open && (mode & 1)) {
+        *clr = COLOR_CN;
+        return L'C';
+    }
+    *clr = COLOR_EN;
+    return L'E';
+}
+
+/* ---------------- 渲染核心 (精准坐标版) ---------------- */
 void Render(void) {
     POINT pt;
     GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
     BOOL useCaret = FALSE;
     
-    // 1. 深度探测输入状态
     if (fg) {
         DWORD tid = GetWindowThreadProcessId(fg, NULL);
         if (GetGUIThreadInfo(tid, &gti)) {
-            // 必须满足：有光标句柄，且光标矩形合法（宽度或高度不为0）
+            // 判定输入状态：有光标句柄且矩形有效
             if (gti.hwndCaret && (gti.rcCaret.bottom - gti.rcCaret.top > 0)) {
-                // 计算光标底部的屏幕坐标
                 POINT caretPt = { gti.rcCaret.left, gti.rcCaret.bottom };
                 ClientToScreen(gti.hwndCaret, &caretPt);
                 
-                // 过滤掉系统异常返回的 (0,0) 或负坐标
                 if (caretPt.x > 0 || caretPt.y > 0) {
-                    // 指示器水平居中于光标：光标左侧 + (光标宽度/2) - (指示器宽度/2)
                     int caretWidth = gti.rcCaret.right - gti.rcCaret.left;
                     pt.x = caretPt.x + (caretWidth / 2) - (IND_W / 2);
-                    pt.y = caretPt.y + 10; // 垂直下方偏移 10 像素
+                    pt.y = caretPt.y + 10; 
                     useCaret = TRUE;
                 }
             }
         }
     }
 
-    // 2. 非输入状态：跟随鼠标
     if (!useCaret) {
         GetCursorPos(&pt);
-        pt.x += 20; // 鼠标右侧偏移
-        pt.y += 20; // 鼠标下方偏移
+        pt.x += 25; pt.y += 25;
     }
 
-    // --- 以下为成熟的渲染逻辑，保持不变 ---
     COLORREF clr;
     WCHAR ch = QueryState(&clr);
+
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = IND_W;
@@ -104,8 +148,8 @@ void Render(void) {
     void* pBits = NULL;
     HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
     HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
-    memset(pBits, 0, IND_W * IND_H * 4);
 
+    memset(pBits, 0, IND_W * IND_H * 4);
     HBRUSH hBr = CreateSolidBrush(clr);
     HGDIOBJ hOldBr = SelectObject(hdcMem, hBr);
     HPEN hPen = CreatePen(PS_SOLID, 1, clr);
@@ -138,67 +182,6 @@ void Render(void) {
     SelectObject(hdcMem, hOldBmp); DeleteObject(hBmp);
     DeleteDC(hdcMem); ReleaseDC(NULL, hdcScreen);
 }
-    
-    // 创建 32 位 DIB 位图，这是分层窗口成功的关键
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = IND_W;
-    bmi.bmiHeader.biHeight = IND_H;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* pBits = NULL;
-    HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-    HGDIOBJ hOldBmp = SelectObject(hdcMem, hBmp);
-
-    // 1. 清空背景为透明 (Alpha = 0)
-    memset(pBits, 0, IND_W * IND_H * 4);
-
-    // 2. 绘制彩色圆圈
-    HBRUSH hBr = CreateSolidBrush(clr);
-    HGDIOBJ hOldBr = SelectObject(hdcMem, hBr);
-    HPEN hPen = CreatePen(PS_SOLID, 1, clr);
-    HGDIOBJ hOldPen = SelectObject(hdcMem, hPen);
-    
-    Ellipse(hdcMem, 0, 0, IND_W - 1, IND_H - 1);
-
-    // 3. 绘制文字
-    SetBkMode(hdcMem, TRANSPARENT);
-    SetTextColor(hdcMem, RGB(255, 255, 255));
-    HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 
-                             DEFAULT_PITCH, L"Arial");
-    HGDIOBJ hOldFont = SelectObject(hdcMem, hFont);
-    RECT r = {0, 0, IND_W, IND_H};
-    WCHAR s[2] = { ch, 0 };
-    DrawTextW(hdcMem, s, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    // 4. 关键：手动强制修复像素的 Alpha 通道
-    // GDI 绘图函数（如 Ellipse, DrawText）通常不更新 32 位位图的 Alpha 位
-    // 我们必须遍历像素，将所有有颜色的像素 Alpha 设为 255 (不透明)
-    LPDWORD pdw = (LPDWORD)pBits;
-    for (int i = 0; i < IND_W * IND_H; i++) {
-        if (pdw[i] != 0) {
-            pdw[i] |= 0xFF000000; 
-        }
-    }
-
-    // 5. 更新分层窗口
-    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    POINT ptSrc = {0, 0};
-    SIZE szWin = { IND_W, IND_H };
-    UpdateLayeredWindow(g_hwnd, hdcScreen, &pt, &szWin, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA);
-
-    // 清理资源
-    SelectObject(hdcMem, hOldFont); DeleteObject(hFont);
-    SelectObject(hdcMem, hOldPen); DeleteObject(hPen);
-    SelectObject(hdcMem, hOldBr); DeleteObject(hBr);
-    SelectObject(hdcMem, hOldBmp); DeleteObject(hBmp);
-    DeleteDC(hdcMem);
-    ReleaseDC(NULL, hdcScreen);
-}
-
 /* ---------------- 窗口逻辑 ---------------- */
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && (l == WM_RBUTTONUP || l == WM_LBUTTONUP)) {
