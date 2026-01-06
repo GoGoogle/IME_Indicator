@@ -102,8 +102,8 @@ void Render(void) {
     // 回退到鼠标跟随
     if (!bHasCaret) {
         GetCursorPos(&pt);
-        pt.x += 20; 
-        pt.y += 20; 
+        pt.x += 25; 
+        pt.y += 25; 
     }
 
     COLORREF clr;
