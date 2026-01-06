@@ -4,12 +4,10 @@
 
 #include <windows.h>
 #include <imm.h>
-#include <ole2.h>
-#include <oleauto.h>
-#include <uiautomation.h>
 #include <shellapi.h>
+#include <ole2.h>
 
-/* -------- GDI+ minimal -------- */
+/* ---------- GDI+ minimal ---------- */
 typedef float REAL;
 typedef UINT32 ARGB;
 typedef enum { SmoothingModeAntiAlias = 4 } SmoothingMode;
@@ -24,40 +22,39 @@ struct GdiplusStartupInput {
     BOOL SuppressExternalCodecs;
 };
 
-__declspec(dllimport) int __stdcall GdiplusStartup(ULONG_PTR*, const struct GdiplusStartupInput*, void*);
+__declspec(dllimport) int  __stdcall GdiplusStartup(ULONG_PTR*, const struct GdiplusStartupInput*, void*);
 __declspec(dllimport) void __stdcall GdiplusShutdown(ULONG_PTR);
-__declspec(dllimport) int __stdcall GdipCreateFromHDC(HDC, GpGraphics**);
-__declspec(dllimport) int __stdcall GdipDeleteGraphics(GpGraphics*);
-__declspec(dllimport) int __stdcall GdipSetSmoothingMode(GpGraphics*, SmoothingMode);
-__declspec(dllimport) int __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
-__declspec(dllimport) int __stdcall GdipDeleteBrush(GpBrush*);
-__declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
+__declspec(dllimport) int  __stdcall GdipCreateFromHDC(HDC, GpGraphics**);
+__declspec(dllimport) int  __stdcall GdipDeleteGraphics(GpGraphics*);
+__declspec(dllimport) int  __stdcall GdipSetSmoothingMode(GpGraphics*, SmoothingMode);
+__declspec(dllimport) int  __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
+__declspec(dllimport) int  __stdcall GdipDeleteBrush(GpBrush*);
+__declspec(dllimport) int  __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
 
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
 #pragma comment(lib,"gdiplus.lib")
 #pragma comment(lib,"imm32.lib")
 #pragma comment(lib,"ole32.lib")
-#pragma comment(lib,"oleaut32.lib")
 #pragma comment(lib,"shell32.lib")
 
+/* ---------- config ---------- */
 #define INDICATOR_SIZE 12
 #define COLOR_CN   0xA0FF7800
 #define COLOR_EN   0x300078FF
 #define COLOR_CAPS 0xA000FF00
 
-#define WM_TRAYICON (WM_USER + 1)
+#define WM_TRAYICON (WM_USER + 100)
 #define ID_EXIT     1
 
 HWND g_hwnd;
 ULONG_PTR g_gdiplus;
 NOTIFYICONDATAW g_nid;
-IUIAutomation* g_uia = NULL;
 
-POINT g_lastPt = { -1,-1 };
+POINT g_lastPt = { -1, -1 };
 UINT  g_lastColor = 0;
 
-/* -------- IME state -------- */
+/* ---------- IME state ---------- */
 UINT GetImeColor(void) {
     HWND fg = GetForegroundWindow();
     BOOL cn = FALSE;
@@ -75,77 +72,26 @@ UINT GetImeColor(void) {
     return cn ? COLOR_CN : COLOR_EN;
 }
 
-/* -------- UIA caret via TextPattern -------- */
-BOOL GetCaretFromUIA(POINT* pt) {
-    IUIAutomationElement* el = NULL;
-    if (FAILED(g_uia->lpVtbl->GetFocusedElement(g_uia, &el)) || !el)
-        return FALSE;
-
-    IUIAutomationTextPattern* tp = NULL;
-    if (FAILED(el->lpVtbl->GetCurrentPattern(
-        el, UIA_TextPatternId, (IUnknown**)&tp)) || !tp) {
-        el->lpVtbl->Release(el);
-        return FALSE;
-    }
-
-    IUIAutomationTextRangeArray* sel = NULL;
-    if (FAILED(tp->lpVtbl->GetSelection(tp, &sel)) || !sel) {
-        tp->lpVtbl->Release(tp);
-        el->lpVtbl->Release(el);
-        return FALSE;
-    }
-
-    IUIAutomationTextRange* range = NULL;
-    sel->lpVtbl->GetElement(sel, 0, &range);
-    sel->lpVtbl->Release(sel);
-
-    if (!range) {
-        tp->lpVtbl->Release(tp);
-        el->lpVtbl->Release(el);
-        return FALSE;
-    }
-
-    SAFEARRAY* rects = NULL;
-    if (SUCCEEDED(range->lpVtbl->GetBoundingRectangles(range, &rects)) &&
-        rects && rects->rgsabound[0].cElements >= 4) {
-
-        double* d;
-        SafeArrayAccessData(rects, (void**)&d);
-        pt->x = (LONG)d[0] + 2;
-        pt->y = (LONG)(d[1] + d[3]) + 2;
-        SafeArrayUnaccessData(rects);
-        SafeArrayDestroy(rects);
-
-        range->lpVtbl->Release(range);
-        tp->lpVtbl->Release(tp);
-        el->lpVtbl->Release(el);
-        return TRUE;
-    }
-
-    if (rects) SafeArrayDestroy(rects);
-    range->lpVtbl->Release(range);
-    tp->lpVtbl->Release(tp);
-    el->lpVtbl->Release(el);
-    return FALSE;
-}
-
-/* -------- fallback -------- */
-void GetCaretFallback(POINT* pt) {
+/* ---------- caret ---------- */
+void GetCaretPos(POINT* pt) {
     GUITHREADINFO gti = { sizeof(gti) };
     HWND fg = GetForegroundWindow();
+
     if (fg &&
         GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti) &&
         gti.hwndCaret) {
+
         POINT p = { gti.rcCaret.left, gti.rcCaret.bottom };
         ClientToScreen(gti.hwndCaret, &p);
         *pt = p;
         return;
     }
+
     GetCursorPos(pt);
     pt->y += 18;
 }
 
-/* -------- render -------- */
+/* ---------- render ---------- */
 void Render(POINT pt, UINT color) {
     if (pt.x == g_lastPt.x && pt.y == g_lastPt.y && color == g_lastColor)
         return;
@@ -187,20 +133,18 @@ void Render(POINT pt, UINT color) {
     ReleaseDC(NULL, hdc);
 }
 
-/* -------- WinEvent -------- */
+/* ---------- WinEvent ---------- */
 void CALLBACK WinEventProc(
     HWINEVENTHOOK h, DWORD e, HWND hwnd,
     LONG idObj, LONG idChild,
     DWORD tid, DWORD time) {
 
     POINT pt;
-    if (!GetCaretFromUIA(&pt))
-        GetCaretFallback(&pt);
-
+    GetCaretPos(&pt);
     Render(pt, GetImeColor());
 }
 
-/* -------- window -------- */
+/* ---------- window ---------- */
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_TRAYICON && l == WM_RBUTTONUP) {
         HMENU mnu = CreatePopupMenu();
@@ -223,11 +167,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-/* -------- entry -------- */
+/* ---------- entry ---------- */
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     CoInitialize(NULL);
-    CoCreateInstance(&CLSID_CUIAutomation, NULL,
-        CLSCTX_INPROC_SERVER, &IID_IUIAutomation, (void**)&g_uia);
 
     struct GdiplusStartupInput si = { 1 };
     GdiplusStartup(&g_gdiplus, &si, NULL);
@@ -261,7 +203,6 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
         DispatchMessageW(&msg);
     }
 
-    if (g_uia) g_uia->lpVtbl->Release(g_uia);
     GdiplusShutdown(g_gdiplus);
     CoUninitialize();
     return 0;
