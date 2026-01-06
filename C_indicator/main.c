@@ -6,9 +6,30 @@
 #include <imm.h>
 #include <shellapi.h>
 
-// --- 关键修复：手动包含 GDI+ 平面接口定义 ---
-// 在纯 C 环境下，我们避开 gdiplus.h，直接引入基础定义
-#include <gdiplusflat.h> 
+// --- 手动定义 GDI+ 必需的类型和结构体 (避开系统头文件冲突) ---
+typedef float REAL;
+typedef UINT32 ARGB;
+typedef enum { SmoothingModeAntiAlias = 4 } SmoothingMode;
+typedef void GpGraphics;
+typedef void GpBrush;
+typedef void GpSolidFill;
+
+struct GdiplusStartupInput {
+    UINT32 GdiplusVersion;
+    void* DebugEventCallback;
+    BOOL SuppressBackgroundThread;
+    BOOL SuppressExternalCodecs;
+};
+
+// --- 手动声明 GDI+ 导出函数 (Flat API) ---
+__declspec(dllimport) int __stdcall GdiplusStartup(ULONG_PTR*, const struct GdiplusStartupInput*, void*);
+__declspec(dllimport) void __stdcall GdiplusShutdown(ULONG_PTR);
+__declspec(dllimport) int __stdcall GdipCreateFromHDC(HDC, GpGraphics**);
+__declspec(dllimport) int __stdcall GdipDeleteGraphics(GpGraphics*);
+__declspec(dllimport) int __stdcall GdipSetSmoothingMode(GpGraphics*, SmoothingMode);
+__declspec(dllimport) int __stdcall GdipCreateSolidFill(ARGB, GpSolidFill**);
+__declspec(dllimport) int __stdcall GdipDeleteBrush(GpBrush*);
+__declspec(dllimport) int __stdcall GdipFillEllipse(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
 
 // --- 配置区 ---
 #define INDICATOR_SIZE 12
@@ -35,7 +56,7 @@ void AddTrayIcon(HWND hwnd) {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_USER + 100;
-    g_nid.hIcon = LoadIcon(NULL, (LPCWSTR)IDI_APPLICATION);
+    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     wcscpy(g_nid.szTip, L"IME Indicator (C)");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -61,7 +82,6 @@ void GetState(unsigned int* color) {
 void Render(int x, int y, unsigned int color) {
     HDC hdc = GetDC(NULL);
     HDC mdc = CreateCompatibleDC(hdc);
-    
     BITMAPINFO bi = {0};
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = INDICATOR_SIZE;
@@ -74,25 +94,20 @@ void Render(int x, int y, unsigned int color) {
     HBITMAP bmp = CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     HGDIOBJ old = SelectObject(mdc, bmp);
 
-    // GDI+ 绘制逻辑
-    GpGraphics* g;
-    GpSolidFill* b;
+    GpGraphics* g; GpSolidFill* b;
     GdipCreateFromHDC(mdc, &g);
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
     GdipCreateSolidFill((ARGB)color, &b);
-    GdipFillEllipse(g, b, 0, 0, (float)INDICATOR_SIZE, (float)INDICATOR_SIZE);
+    GdipFillEllipse(g, b, 0, 0, (REAL)INDICATOR_SIZE, (REAL)INDICATOR_SIZE);
 
     POINT dst = { x + OFFSET_X, y + OFFSET_Y }, src = { 0, 0 };
     SIZE sz = { INDICATOR_SIZE, INDICATOR_SIZE };
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(g_hwnd, hdc, &dst, &sz, mdc, &src, 0, &bf, ULW_ALPHA);
 
-    GdipDeleteBrush(b);
-    GdipDeleteGraphics(g);
-    SelectObject(mdc, old);
-    DeleteObject(bmp);
-    DeleteDC(mdc);
-    ReleaseDC(NULL, hdc);
+    GdipDeleteBrush(b); GdipDeleteGraphics(g);
+    SelectObject(mdc, old); DeleteObject(bmp);
+    DeleteDC(mdc); ReleaseDC(NULL, hdc);
 }
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -102,18 +117,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR lp, int ns) {
-    // 强制适配 C 语言的启动结构体
-    struct GdiplusStartupInput si;
-    si.GdiplusVersion = 1;
-    si.DebugEventCallback = NULL;
-    si.SuppressBackgroundThread = FALSE;
-    si.SuppressExternalCodecs = FALSE;
-    
+    struct GdiplusStartupInput si = {1, NULL, FALSE, FALSE};
     GdiplusStartup(&g_token, &si, NULL);
     
     g_uShellRestart = RegisterWindowMessageW(L"TaskbarCreated");
-
-    WNDCLASSEXW wc = { sizeof(WNDCLASSEXW), 0, WndProc, 0, 0, hi, NULL, NULL, NULL, NULL, L"IC", NULL };
+    WNDCLASSEXW wc = {sizeof(WNDCLASSEXW), 0, WndProc, 0, 0, hi, NULL, NULL, NULL, NULL, L"IC", NULL};
     RegisterClassExW(&wc);
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, 
                              L"IC", L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, hi, NULL);
@@ -130,7 +138,6 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR lp, int ns) {
         GetState(&c); Render(p.x, p.y, c);
         Sleep(10);
     }
-
 cleanup:
     GdiplusShutdown(g_token);
     return 0;
