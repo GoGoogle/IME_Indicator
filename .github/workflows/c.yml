@@ -43,8 +43,8 @@ jobs:
         中文状态：橙底白字 中；\n
         英文状态：蓝底白字 E；\n
         大写锁定：绿底白字 A；\n
-        在Windows10上使用双屏幕测试通过。
-        ![notepad_P3KCztHg5v](https://github.com/user-attachments/assets/1404ae33-8876-4ea6-9ebb-7037c7df88ca)"
+        在Windows10上使用双屏幕测试通过。\n
+        ![notepad_jcKXS5BkwW](https://github.com/user-attachments/assets/24a33648-9f5f-466c-bdeb-5ac8c1da6bdd)"
         # --- 关键修改点 3：这里的路径也要对应 ---
         files: ./C_indicator/ByLC_IME-Indicator-C.exe
       env:
