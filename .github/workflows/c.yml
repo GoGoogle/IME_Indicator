@@ -22,7 +22,7 @@ jobs:
     - name: Compile
       # --- 关键修改点 1：指向你的子目录 ---
       working-directory: ./C_indicator
-      run: cl.exe /O2 /MT /utf-8 /Fe:IME-Indicator-C.exe main.c /link /SUBSYSTEM:WINDOWS
+      run: cl.exe /O2 /MT /utf-8 /Fe:ByLC_IME-Indicator-C.exe main.c /link /SUBSYSTEM:WINDOWS
 
     - name: Upload Artifact
       if: "!startsWith(github.ref, 'refs/tags/')"
@@ -40,12 +40,12 @@ jobs:
         body: "纯 C 重构版：位于子目录 C_indicator 下的编译版本。\n
         让Gemini使用C语言重构的版本\n
         功能如下：\n
+        中文状态：橙底白字 中；\n
         英文状态：蓝底白字 E；\n
-        中文状态：橙底白字 C；\n
         大写锁定：绿底白字 A；\n
         在Windows10上使用双屏幕测试通过。
         ![notepad_P3KCztHg5v](https://github.com/user-attachments/assets/1404ae33-8876-4ea6-9ebb-7037c7df88ca)"
         # --- 关键修改点 3：这里的路径也要对应 ---
-        files: ./C_indicator/IME-Indicator-C.exe
+        files: ./C_indicator/ByLC_IME-Indicator-C.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
