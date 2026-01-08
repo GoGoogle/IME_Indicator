@@ -82,7 +82,7 @@ WCHAR QueryState(COLORREF* clr) {
     }
     if (open && (mode & 1)) {
         *clr = COLOR_CN;
-        return L'C';
+        return L'中';
     }
     *clr = COLOR_EN;
     return L'E';
@@ -200,9 +200,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 L"输入指示器 (IME Indicator)功能如下：\n"
                 L"在光标和鼠标底部用彩色带字母的小圆点指示中、英及大写状态\n\n"
                 L"英文状态：蓝底白字 E；\n"
-                L"中文状态：橙底白字 C；\n"
+                L"中文状态：橙底白字 中；\n"
                 L"大写锁定：绿底白字 A；\n\n"
-                L"修复了多显示器(负坐标)光标失效的Bug。By LC 2026.1.6", 
+                L"把中文状态的字母“C”更新成中文字符“中”，更加直观。By LC 2026.1.8", 
                 L"关于 IME Indicator", 
                 MB_OK | MB_ICONINFORMATION);
         }
