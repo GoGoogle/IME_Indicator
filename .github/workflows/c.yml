@@ -30,7 +30,7 @@ jobs:
       with:
         name: IME-Indicator-Manual
         # --- 关键修改点 2：这里的路径也要对应 ---
-        path: ./C_indicator/IME-Indicator-C.exe
+        path: ./C_indicator/ByLC_IME-Indicator-C.exe
 
     - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
