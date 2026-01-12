@@ -12,8 +12,8 @@
 #pragma comment(lib,"shell32.lib")
 
 // --- 基础定义（保持原样） ---
-#define IND_W 24
-#define IND_H 24
+#define IND_W 18
+#define IND_H 18
 
 // 颜色定义 (BGR 格式)
 #define COLOR_CN   0x000078FF // 橙色
@@ -100,7 +100,7 @@ void Render(void) {
     // 计算缩放后的实际长宽和字体大小
     int curW = (int)(IND_W * scale);
     int curH = (int)(IND_H * scale);
-    int fontSize = (int)(-16 * scale);
+    int fontSize = (int)(-12 * scale);
 
     POINT pt = {0};
     GUITHREADINFO gti = { sizeof(gti) };
