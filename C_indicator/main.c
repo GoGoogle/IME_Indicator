@@ -267,7 +267,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     L"1. 解决休眠、睡眠唤醒后图标消失或停止渲染的问题。\n"
                     L"2. 监听显示器变更，防止分辨率改变后指示器漂移。\n"
                     L"3. 若要完美跟踪所有窗口焦点，请以【管理员身份】运行。\n\n"
-                    L"By LC & Grok & Gemini 2026.01.12", 
+                    L"By LC & Grok & Gemini 2026.09.28", 
                     L"关于 IME Indicator", 
                     MB_OK | MB_ICONINFORMATION);
             }
