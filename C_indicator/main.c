@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <imm.h>
 #include <shellapi.h>
+#include <string.h>
+#include <stdlib.h>
 
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
@@ -22,6 +24,9 @@
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_ABOUT    1001
 #define ID_EXIT     1002
+#define ID_ONLY_WHEN_TYPING 1003
+#define TIMER_RENDER 1
+#define TIMER_RESUME_REFRESH 2
 
 #ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)-4)
@@ -42,6 +47,8 @@ static WCHAR    g_lastChar  = 0;
 static POINT    g_lastPos   = { -10000, -10000 }; 
 static BOOL     g_lastHasCaret = FALSE;
 static int      g_lastDpi = 0;
+// TRUE 时，只在系统可取得编辑插入点（光标）时显示指示器。
+static BOOL     g_onlyWhenTyping = FALSE;
 
 /* ---------------- 强制重置渲染缓存 ---------------- */
 void InvalidateRenderCache(void) {
@@ -149,9 +156,22 @@ void Render(void) {
     }
 
     if (!hasCaret) {
+        // 启用该选项后，没有文本插入点时不在鼠标旁显示。
+        if (g_onlyWhenTyping) {
+            if (IsWindowVisible(g_hwnd)) {
+                ShowWindow(g_hwnd, SW_HIDE);
+                InvalidateRenderCache();
+            }
+            return;
+        }
         GetCursorPos(&pt);
         pt.x += (int)(15 * scale); 
         pt.y += (int)(15 * scale);
+    }
+
+    // 先前可能因没有插入点而隐藏；恢复后必须重新显示。
+    if (!IsWindowVisible(g_hwnd)) {
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     }
 
     COLORREF curC;
@@ -233,8 +253,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (w == PBT_APMRESUMEAUTOMATIC || w == 0x0007 /*PBT_APMRESUMESUSPEND*/) {
                 Shell_NotifyIconW(NIM_MODIFY, &g_nid); 
                 InvalidateRenderCache();
-                // 重置置顶状态，防止被其他程序覆盖
-                SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                // 唤醒后分层窗口可能仍存在但不再合成；重新显示并延迟重绘一次。
+                ShowWindow(h, SW_SHOWNOACTIVATE);
+                SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                Render();
+                SetTimer(h, TIMER_RESUME_REFRESH, 500, NULL);
             }
             break;
 
@@ -246,6 +270,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_TRAYICON:
             if (l == WM_RBUTTONUP || l == WM_LBUTTONUP) {
                 HMENU menu = CreatePopupMenu();
+                AppendMenuW(menu,
+                            MF_STRING | (g_onlyWhenTyping ? MF_CHECKED : MF_UNCHECKED),
+                            ID_ONLY_WHEN_TYPING,
+                            L"仅在可输入文字时显示");
+                AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(menu, MF_STRING, ID_ABOUT, L"关于 (About)");
                 AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
                 AppendMenuW(menu, MF_STRING, ID_EXIT, L"退出 (Exit)");
@@ -257,17 +286,25 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             break;
 
         case WM_COMMAND:
-            if (LOWORD(w) == ID_ABOUT) {
+            if (LOWORD(w) == ID_ONLY_WHEN_TYPING) {
+                g_onlyWhenTyping = !g_onlyWhenTyping;
+                InvalidateRenderCache();
+                Render();
+            }
+            else if (LOWORD(w) == ID_ABOUT) {
                 MessageBoxW(h, 
-                    L"IME Indicator V6.1 Final\n\n"
+                    L"IME Indicator V7 Final\n\n"
                     L"功能特性：\n"
                     L"1. 在光标或鼠标底部用彩色小点指示输入状态。\n"
-                    L"2. 状态定义：蓝底(英), 橙底(中), 绿底(大写锁定)。\n\n"
+                    L"2. 状态定义：蓝底(英), 橙底(中), 绿底(大写锁定)。\n"
+                    L"3. 托盘菜单可启用「仅在可输入文字时显示」；启用后，"
+                    L"没有文本插入光标时将隐藏指示器。\n\n"
                     L"核心修复：\n"
-                    L"1. 解决休眠、睡眠唤醒后图标消失或停止渲染的问题。\n"
+                    L"1. 睡眠或休眠唤醒后自动恢复窗口显示、置顶与重绘，"
+                    L"避免指示状态消失。\n"
                     L"2. 监听显示器变更，防止分辨率改变后指示器漂移。\n"
                     L"3. 若要完美跟踪所有窗口焦点，请以【管理员身份】运行。\n\n"
-                    L"By LC & Grok & Gemini 2026.09.28", 
+                    L"By LC & Grok & Gemini & ChatGPT 2026.09.30", 
                     L"关于 IME Indicator", 
                     MB_OK | MB_ICONINFORMATION);
             }
@@ -277,7 +314,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             break;
 
         case WM_TIMER:
-            Render();
+            if (w == TIMER_RESUME_REFRESH) {
+                KillTimer(h, TIMER_RESUME_REFRESH);
+                InvalidateRenderCache();
+                Render();
+            }
+            else if (w == TIMER_RENDER) {
+                Render();
+            }
             break;
 
         case WM_DESTROY:
@@ -334,7 +378,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     
     // 优化：修改为 50ms (避免 15ms 的高频 CPU 占用，50ms 视觉上已足够跟手)
-    SetTimer(g_hwnd, 1, 50, NULL); 
+    SetTimer(g_hwnd, TIMER_RENDER, 50, NULL); 
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
