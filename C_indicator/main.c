@@ -1,6 +1,7 @@
 #define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
 
 #include <windows.h>
 #include <imm.h>
@@ -9,11 +10,14 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <strsafe.h>
+#include <uiautomation.h>
 
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
 #pragma comment(lib,"imm32.lib")
 #pragma comment(lib,"shell32.lib")
+#pragma comment(lib,"ole32.lib")
+#pragma comment(lib,"uiautomationcore.lib")
 
 // ==================== 基础定义 ====================
 #define IND_W 15
@@ -46,6 +50,11 @@ static WCHAR g_logPath[MAX_PATH] = {0};
 static HWND g_lastForeground = NULL;
 static HWND g_lastInputWindow = NULL;
 static const WCHAR* g_imeSource = L"unknown";
+static IUIAutomation* g_uia = NULL;
+static BOOL g_uiaInitialized = FALSE;
+static HWND g_uiaCachedWindow = NULL;
+static BOOL g_uiaCachedAcceptsText = FALSE;
+static ULONGLONG g_uiaNextCheck = 0;
 
 // 缓存机制状态
 static COLORREF g_lastColor = 0;
