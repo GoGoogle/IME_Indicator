@@ -103,16 +103,74 @@ void EnableDeepDPI(void) {
     SetProcessDPIAware();
 }
 
+/* 返回前台线程真正接收键盘输入的子窗口，而不是仅返回顶层窗口。 */
+HWND GetInputWindow(HWND fg) {
+    if (!fg) return NULL;
+
+    GUITHREADINFO gti = { sizeof(gti) };
+    DWORD tid = GetWindowThreadProcessId(fg, NULL);
+    if (tid && GetGUIThreadInfo(tid, &gti) && gti.hwndFocus) {
+        return gti.hwndFocus;
+    }
+    return fg;
+}
+
+/* 根据锚点所在显示器取得 DPI，避免多屏（尤其不同缩放比例）下错位。 */
+UINT GetDpiForPoint(POINT pt, HWND fallbackWindow) {
+    typedef HRESULT (WINAPI *PGetDpiForMonitor)(HMONITOR, int, UINT*, UINT*);
+    HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    UINT dpiX = 96, dpiY = 96;
+
+    if (shcore && monitor) {
+        PGetDpiForMonitor getDpiForMonitor =
+            (PGetDpiForMonitor)GetProcAddress(shcore, "GetDpiForMonitor");
+        if (getDpiForMonitor && SUCCEEDED(getDpiForMonitor(monitor, 0, &dpiX, &dpiY))) {
+            FreeLibrary(shcore);
+            return dpiX;
+        }
+    }
+    if (shcore) FreeLibrary(shcore);
+
+    dpiX = fallbackWindow ? GetDpiForWindow(fallbackWindow) : 96;
+    return dpiX ? dpiX : 96;
+}
+
+/*
+ * 原生 Win32 编辑框会提供插入点；部分现代框架不会，因此再用
+ * WM_GETDLGCODE 判断当前焦点窗口是否声明接收文本/编辑键。
+ */
+BOOL WindowAcceptsText(HWND hwnd) {
+    DWORD_PTR dlgCode = 0;
+    if (!hwnd || !SendMessageTimeoutW(hwnd, WM_GETDLGCODE, 0, 0,
+                                      SMTO_ABORTIFHUNG | SMTO_BLOCK, 80, &dlgCode)) {
+        return FALSE;
+    }
+    return (dlgCode & (DLGC_WANTCHARS | DLGC_WANTALLKEYS | DLGC_HASSETSEL)) != 0;
+}
+
 /* ---------------- 输入状态查询 ---------------- */
-WCHAR QueryState(COLORREF* color) {
+WCHAR QueryState(HWND inputWindow, COLORREF* color) {
     if (GetKeyState(VK_CAPITAL) & 1) {
         *color = COLOR_CAPS;
         return L'A';
     }
 
-    HWND fg = GetForegroundWindow();
-    if (fg) {
-        HWND ime = ImmGetDefaultIMEWnd(fg);
+    if (inputWindow) {
+        HIMC himc = ImmGetContext(inputWindow);
+        if (himc) {
+            BOOL isOpen = ImmGetOpenStatus(himc);
+            DWORD convMode = 0, sentenceMode = 0;
+            ImmGetConversionStatus(himc, &convMode, &sentenceMode);
+            ImmReleaseContext(inputWindow, himc);
+            if (isOpen && (convMode & IME_CMODE_NATIVE)) {
+                *color = COLOR_CN;
+                return L'中';
+            }
+        }
+
+        // 某些 TSF/浏览器类窗口不直接暴露 HIMC，保留原 IME 窗口查询作后备。
+        HWND ime = ImmGetDefaultIMEWnd(inputWindow);
         DWORD_PTR isOpen = 0, convMode = 0;
         if (ime && SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x005, 0, SMTO_ABORTIFHUNG, 80, &isOpen) && isOpen) {
             SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x001, 0, SMTO_ABORTIFHUNG, 80, &convMode);
@@ -128,16 +186,11 @@ WCHAR QueryState(COLORREF* color) {
 
 /* ---------------- 核心渲染引擎 ---------------- */
 void Render(void) {
-    UINT dpi = GetDpiForWindow(g_hwnd);
-    if (dpi == 0) dpi = 96;
-    double scale = (double)dpi / 96.0;
-
-    int w = (int)(IND_W * scale);
-    int h = (int)(IND_H * scale);
-
+    POINT anchor = {0};
     POINT pt = {0};
     BOOL hasCaret = FALSE;
     HWND fg = GetForegroundWindow();
+    HWND inputWindow = GetInputWindow(fg);
 
     // 定位光标或鼠标位置
     if (fg) {
@@ -147,26 +200,40 @@ void Render(void) {
                 POINT cp = { gti.rcCaret.left, gti.rcCaret.bottom };
                 ClientToScreen(gti.hwndCaret, &cp);
                 if (MonitorFromPoint(cp, MONITOR_DEFAULTTONULL)) {
-                    pt.x = cp.x + (gti.rcCaret.right - gti.rcCaret.left) / 2 - w / 2;
-                    pt.y = cp.y + (int)(2 * scale);
+                    anchor.x = cp.x + (gti.rcCaret.right - gti.rcCaret.left) / 2;
+                    anchor.y = cp.y;
                     hasCaret = TRUE;
                 }
             }
         }
     }
 
-    if (!hasCaret) {
-        // 启用该选项后，没有文本插入点时不在鼠标旁显示。
-        if (g_onlyWhenTyping) {
-            if (IsWindowVisible(g_hwnd)) {
-                ShowWindow(g_hwnd, SW_HIDE);
-                InvalidateRenderCache();
-            }
-            return;
+    if (!hasCaret) GetCursorPos(&anchor);
+
+    /*
+     * 没有原生 caret 的现代界面（例如 Chromium/Electron）仍可能接收文本。
+     * 此时以 WM_GETDLGCODE 为后备判定，避免“仅在可输入文字时显示”误隐藏。
+     */
+    if (g_onlyWhenTyping && !hasCaret && !WindowAcceptsText(inputWindow)) {
+        if (IsWindowVisible(g_hwnd)) {
+            ShowWindow(g_hwnd, SW_HIDE);
+            InvalidateRenderCache();
         }
-        GetCursorPos(&pt);
-        pt.x += (int)(15 * scale); 
-        pt.y += (int)(15 * scale);
+        return;
+    }
+
+    // 必须以锚点所在显示器的 DPI 计算尺寸；g_hwnd 可能还停留在另一块屏幕。
+    UINT dpi = GetDpiForPoint(anchor, inputWindow ? inputWindow : fg);
+    double scale = (double)dpi / 96.0;
+    int w = (int)(IND_W * scale);
+    int h = (int)(IND_H * scale);
+
+    if (hasCaret) {
+        pt.x = anchor.x - w / 2;
+        pt.y = anchor.y + (int)(2 * scale);
+    } else {
+        pt.x = anchor.x + (int)(15 * scale);
+        pt.y = anchor.y + (int)(15 * scale);
     }
 
     // 先前可能因没有插入点而隐藏；恢复后必须重新显示。
@@ -175,7 +242,7 @@ void Render(void) {
     }
 
     COLORREF curC;
-    WCHAR curChar = QueryState(&curC);
+    WCHAR curChar = QueryState(inputWindow ? inputWindow : fg, &curC);
 
     // 缓存校验：避免无意义重绘，降低系统负载
     if (curChar == g_lastChar && curC == g_lastColor && 
@@ -293,7 +360,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             else if (LOWORD(w) == ID_ABOUT) {
                 MessageBoxW(h, 
-                    L"IME Indicator V7 Final\n\n"
+                    L"IME Indicator V7.1 Final\n\n"
                     L"功能特性：\n"
                     L"1. 在光标或鼠标底部用彩色小点指示输入状态。\n"
                     L"2. 状态定义：蓝底(英), 橙底(中), 绿底(大写锁定)。\n"
@@ -302,8 +369,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     L"核心修复：\n"
                     L"1. 睡眠或休眠唤醒后自动恢复窗口显示、置顶与重绘，"
                     L"避免指示状态消失。\n"
-                    L"2. 监听显示器变更，防止分辨率改变后指示器漂移。\n"
-                    L"3. 若要完美跟踪所有窗口焦点，请以【管理员身份】运行。\n\n"
+                    L"2. 按光标所在显示器的 DPI 定位，改善多屏、不同缩放比例下的偏差。\n"
+                    L"3. 优先读取实际焦点子窗口的输入状态，并兼容没有原生光标的现代桌面应用。\n"
+                    L"4. 受 Windows 权限隔离限制，如需跟踪管理员窗口，请以【管理员身份】运行。\n\n"
                     L"By LC & Grok & Gemini & ChatGPT 2026.09.30", 
                     L"关于 IME Indicator", 
                     MB_OK | MB_ICONINFORMATION);
