@@ -136,17 +136,41 @@ UINT GetDpiForPoint(POINT pt, HWND fallbackWindow) {
     return dpiX ? dpiX : 96;
 }
 
+/* 运行时获取 API，兼容使用旧版 Windows SDK 的编译环境。 */
+void ConvertPointToPhysical(HWND hwnd, POINT* pt) {
+    typedef BOOL (WINAPI *PLogicalToPhysicalPointForPerMonitorDPI)(HWND, LPPOINT);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    PLogicalToPhysicalPointForPerMonitorDPI convert = user32
+        ? (PLogicalToPhysicalPointForPerMonitorDPI)GetProcAddress(
+              user32, "LogicalToPhysicalPointForPerMonitorDPI")
+        : NULL;
+    if (convert) convert(hwnd, pt);
+}
+
 /*
  * 原生 Win32 编辑框会提供插入点；部分现代框架不会，因此再用
  * WM_GETDLGCODE 判断当前焦点窗口是否声明接收文本/编辑键。
  */
 BOOL WindowAcceptsText(HWND hwnd) {
     DWORD_PTR dlgCode = 0;
-    if (!hwnd || !SendMessageTimeoutW(hwnd, WM_GETDLGCODE, 0, 0,
-                                      SMTO_ABORTIFHUNG | SMTO_BLOCK, 80, &dlgCode)) {
-        return FALSE;
+    if (hwnd && SendMessageTimeoutW(hwnd, WM_GETDLGCODE, 0, 0,
+                                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 80, &dlgCode) &&
+        (dlgCode & (DLGC_WANTCHARS | DLGC_WANTALLKEYS | DLGC_HASSETSEL))) {
+        return TRUE;
     }
-    return (dlgCode & (DLGC_WANTCHARS | DLGC_WANTALLKEYS | DLGC_HASSETSEL)) != 0;
+
+    /*
+     * Chromium/Electron 等窗口通常不实现 WM_GETDLGCODE，但会为获得焦点的
+     * 渲染窗口关联 HIMC。此后备项只用于“是否隐藏”的判定，不改变 IME 状态。
+     */
+    if (hwnd) {
+        HIMC himc = ImmGetContext(hwnd);
+        if (himc) {
+            ImmReleaseContext(hwnd, himc);
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 /* ---------------- 输入状态查询 ---------------- */
@@ -180,6 +204,37 @@ WCHAR QueryState(HWND inputWindow, COLORREF* color) {
             }
         }
     }
+
+    /*
+     * 有些 Chromium/Electron 窗口的焦点落在内部渲染子窗口，但 IME 状态仍
+     * 绑定于顶层窗口；两者不同且子窗口未给出中文状态时再查询一次顶层窗口。
+     */
+    HWND fg = GetForegroundWindow();
+    if (fg && fg != inputWindow) {
+        HIMC himc = ImmGetContext(fg);
+        if (himc) {
+            BOOL isOpen = ImmGetOpenStatus(himc);
+            DWORD convMode = 0, sentenceMode = 0;
+            ImmGetConversionStatus(himc, &convMode, &sentenceMode);
+            ImmReleaseContext(fg, himc);
+            if (isOpen && (convMode & IME_CMODE_NATIVE)) {
+                *color = COLOR_CN;
+                return L'中';
+            }
+        }
+
+        HWND ime = ImmGetDefaultIMEWnd(fg);
+        DWORD_PTR isOpen = 0, convMode = 0;
+        if (ime && SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x005, 0,
+                                       SMTO_ABORTIFHUNG, 80, &isOpen) && isOpen) {
+            SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x001, 0,
+                                SMTO_ABORTIFHUNG, 80, &convMode);
+            if (convMode & IME_CMODE_NATIVE) {
+                *color = COLOR_CN;
+                return L'中';
+            }
+        }
+    }
     *color = COLOR_EN;
     return L'E';
 }
@@ -199,6 +254,9 @@ void Render(void) {
             if (gti.rcCaret.bottom > gti.rcCaret.top) {
                 POINT cp = { gti.rcCaret.left, gti.rcCaret.bottom };
                 ClientToScreen(gti.hwndCaret, &cp);
+                // GetGUIThreadInfo 返回的坐标可能按目标进程的 DPI 虚拟化。
+                // 统一转成物理像素，避免 DPI-unaware 应用位于副屏时发生位移。
+                ConvertPointToPhysical(gti.hwndCaret, &cp);
                 if (MonitorFromPoint(cp, MONITOR_DEFAULTTONULL)) {
                     anchor.x = cp.x + (gti.rcCaret.right - gti.rcCaret.left) / 2;
                     anchor.y = cp.y;
@@ -360,7 +418,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             else if (LOWORD(w) == ID_ABOUT) {
                 MessageBoxW(h, 
-                    L"IME Indicator V7.1 Final\n\n"
+                    L"IME Indicator V7.2 Final\n\n"
                     L"功能特性：\n"
                     L"1. 在光标或鼠标底部用彩色小点指示输入状态。\n"
                     L"2. 状态定义：蓝底(英), 橙底(中), 绿底(大写锁定)。\n"
