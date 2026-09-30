@@ -7,6 +7,8 @@
 #include <shellapi.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <strsafe.h>
 
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
@@ -40,6 +42,10 @@
 static HWND g_hwnd;
 static NOTIFYICONDATAW g_nid = {0};
 static UINT g_TaskbarRestartMsg = 0; // 用于处理 explorer.exe 重启
+static WCHAR g_logPath[MAX_PATH] = {0};
+static HWND g_lastForeground = NULL;
+static HWND g_lastInputWindow = NULL;
+static const WCHAR* g_imeSource = L"unknown";
 
 // 缓存机制状态
 static COLORREF g_lastColor = 0;
@@ -49,6 +55,72 @@ static BOOL     g_lastHasCaret = FALSE;
 static int      g_lastDpi = 0;
 // TRUE 时，只在系统可取得编辑插入点（光标）时显示指示器。
 static BOOL     g_onlyWhenTyping = FALSE;
+
+/* ---------------- 诊断日志 ---------------- */
+void LogEvent(const WCHAR* format, ...) {
+    if (!g_logPath[0]) return;
+
+    WCHAR message[1024];
+    WCHAR line[1200];
+    va_list args;
+    SYSTEMTIME now;
+    va_start(args, format);
+    StringCchVPrintfW(message, _countof(message), format, args);
+    va_end(args);
+
+    GetLocalTime(&now);
+    StringCchPrintfW(line, _countof(line),
+                     L"%04u-%02u-%02u %02u:%02u:%02u.%03u %s\r\n",
+                     now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+                     now.wSecond, now.wMilliseconds, message);
+
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, line, -1, NULL, 0, NULL, NULL);
+    if (bytes <= 1) return;
+    char utf8[2400];
+    if (!WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, (int)_countof(utf8), NULL, NULL)) return;
+
+    HANDLE file = CreateFileW(g_logPath, FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(file, utf8, (DWORD)(bytes - 1), &written, NULL);
+        CloseHandle(file);
+    }
+}
+
+void InitializeLog(void) {
+    WCHAR localAppData[MAX_PATH];
+    DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData,
+                                           _countof(localAppData));
+    if (length && length < _countof(localAppData)) {
+        WCHAR directory[MAX_PATH];
+        StringCchPrintfW(directory, _countof(directory), L"%s\\IME Indicator", localAppData);
+        CreateDirectoryW(directory, NULL);
+        StringCchPrintfW(g_logPath, _countof(g_logPath), L"%s\\IME_Indicator.log", directory);
+    }
+    LogEvent(L"START version=V7.3 onlyWhenTyping=%d", g_onlyWhenTyping);
+}
+
+void LogFocusChange(HWND fg, HWND inputWindow) {
+    if (fg == g_lastForeground && inputWindow == g_lastInputWindow) return;
+
+    WCHAR fgClass[128] = L"";
+    WCHAR inputClass[128] = L"";
+    DWORD fgPid = 0, inputPid = 0;
+    if (fg) {
+        GetClassNameW(fg, fgClass, _countof(fgClass));
+        GetWindowThreadProcessId(fg, &fgPid);
+    }
+    if (inputWindow) {
+        GetClassNameW(inputWindow, inputClass, _countof(inputClass));
+        GetWindowThreadProcessId(inputWindow, &inputPid);
+    }
+    LogEvent(L"FOCUS fg=%p pid=%lu class=%s input=%p pid=%lu class=%s",
+             fg, fgPid, fgClass, inputWindow, inputPid, inputClass);
+    g_lastForeground = fg;
+    g_lastInputWindow = inputWindow;
+}
 
 /* ---------------- 强制重置渲染缓存 ---------------- */
 void InvalidateRenderCache(void) {
@@ -176,6 +248,7 @@ BOOL WindowAcceptsText(HWND hwnd) {
 /* ---------------- 输入状态查询 ---------------- */
 WCHAR QueryState(HWND inputWindow, COLORREF* color) {
     if (GetKeyState(VK_CAPITAL) & 1) {
+        g_imeSource = L"caps-lock";
         *color = COLOR_CAPS;
         return L'A';
     }
@@ -188,6 +261,7 @@ WCHAR QueryState(HWND inputWindow, COLORREF* color) {
             ImmGetConversionStatus(himc, &convMode, &sentenceMode);
             ImmReleaseContext(inputWindow, himc);
             if (isOpen && (convMode & IME_CMODE_NATIVE)) {
+                g_imeSource = L"input-himc";
                 *color = COLOR_CN;
                 return L'中';
             }
@@ -199,6 +273,7 @@ WCHAR QueryState(HWND inputWindow, COLORREF* color) {
         if (ime && SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x005, 0, SMTO_ABORTIFHUNG, 80, &isOpen) && isOpen) {
             SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x001, 0, SMTO_ABORTIFHUNG, 80, &convMode);
             if (convMode & IME_CMODE_NATIVE) {
+                g_imeSource = L"input-ime-window";
                 *color = COLOR_CN;
                 return L'中';
             }
@@ -218,6 +293,7 @@ WCHAR QueryState(HWND inputWindow, COLORREF* color) {
             ImmGetConversionStatus(himc, &convMode, &sentenceMode);
             ImmReleaseContext(fg, himc);
             if (isOpen && (convMode & IME_CMODE_NATIVE)) {
+                g_imeSource = L"foreground-himc";
                 *color = COLOR_CN;
                 return L'中';
             }
@@ -230,11 +306,13 @@ WCHAR QueryState(HWND inputWindow, COLORREF* color) {
             SendMessageTimeoutW(ime, WM_IME_CONTROL, 0x001, 0,
                                 SMTO_ABORTIFHUNG, 80, &convMode);
             if (convMode & IME_CMODE_NATIVE) {
+                g_imeSource = L"foreground-ime-window";
                 *color = COLOR_CN;
                 return L'中';
             }
         }
     }
+    g_imeSource = L"english-fallback";
     *color = COLOR_EN;
     return L'E';
 }
@@ -246,6 +324,7 @@ void Render(void) {
     BOOL hasCaret = FALSE;
     HWND fg = GetForegroundWindow();
     HWND inputWindow = GetInputWindow(fg);
+    LogFocusChange(fg, inputWindow);
 
     // 定位光标或鼠标位置
     if (fg) {
@@ -274,6 +353,7 @@ void Render(void) {
      */
     if (g_onlyWhenTyping && !hasCaret && !WindowAcceptsText(inputWindow)) {
         if (IsWindowVisible(g_hwnd)) {
+            LogEvent(L"HIDE reason=no-text-input fg=%p input=%p", fg, inputWindow);
             ShowWindow(g_hwnd, SW_HIDE);
             InvalidateRenderCache();
         }
@@ -311,6 +391,8 @@ void Render(void) {
 
     g_lastChar = curChar; g_lastColor = curC; g_lastPos = pt; 
     g_lastHasCaret = hasCaret; g_lastDpi = dpi;
+    LogEvent(L"RENDER state=%c source=%s caret=%d anchor=(%ld,%ld) pos=(%ld,%ld) dpi=%u",
+             curChar, g_imeSource, hasCaret, anchor.x, anchor.y, pt.x, pt.y, dpi);
 
     HDC hdcS = GetDC(NULL);
     HDC hdcM = CreateCompatibleDC(hdcS);
@@ -349,7 +431,9 @@ void Render(void) {
         BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
         SIZE sz = { w, h };
         POINT sPt = { 0, 0 };
-        UpdateLayeredWindow(g_hwnd, hdcS, &pt, &sz, hdcM, &sPt, 0, &bf, ULW_ALPHA);
+        if (!UpdateLayeredWindow(g_hwnd, hdcS, &pt, &sz, hdcM, &sPt, 0, &bf, ULW_ALPHA)) {
+            LogEvent(L"ERROR UpdateLayeredWindow code=%lu", GetLastError());
+        }
 
         // 统一恢复上下文资源
         RestoreDC(hdcM, dcState);
@@ -367,6 +451,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     // 1. 拦截资源管理器重启消息，自动恢复托盘图标
     if (m == g_TaskbarRestartMsg && g_TaskbarRestartMsg != 0) {
         Shell_NotifyIconW(NIM_ADD, &g_nid);
+        LogEvent(L"TASKBAR recreated");
         InvalidateRenderCache();
         return 0;
     }
@@ -376,6 +461,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_POWERBROADCAST:
             // PBT_APMRESUMEAUTOMATIC 表示系统从休眠/睡眠中自动恢复
             if (w == PBT_APMRESUMEAUTOMATIC || w == 0x0007 /*PBT_APMRESUMESUSPEND*/) {
+                LogEvent(L"POWER resume event=%lu", (DWORD)w);
                 Shell_NotifyIconW(NIM_MODIFY, &g_nid); 
                 InvalidateRenderCache();
                 // 唤醒后分层窗口可能仍存在但不再合成；重新显示并延迟重绘一次。
@@ -389,6 +475,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         // 3. 监听显示器分辨率/多屏插拔变化
         case WM_DISPLAYCHANGE:
+            LogEvent(L"DISPLAYCHANGE width=%u height=%u bpp=%u", LOWORD(l), HIWORD(l), (UINT)w);
             InvalidateRenderCache();
             break;
 
@@ -413,12 +500,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_COMMAND:
             if (LOWORD(w) == ID_ONLY_WHEN_TYPING) {
                 g_onlyWhenTyping = !g_onlyWhenTyping;
+                LogEvent(L"SETTING onlyWhenTyping=%d", g_onlyWhenTyping);
                 InvalidateRenderCache();
                 Render();
             }
             else if (LOWORD(w) == ID_ABOUT) {
                 MessageBoxW(h, 
-                    L"IME Indicator V7.2 Final\n\n"
+                    L"IME Indicator V7.3 Final\n\n"
                     L"功能特性：\n"
                     L"1. 在光标或鼠标底部用彩色小点指示输入状态。\n"
                     L"2. 状态定义：蓝底(英), 橙底(中), 绿底(大写锁定)。\n"
@@ -429,7 +517,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     L"避免指示状态消失。\n"
                     L"2. 按光标所在显示器的 DPI 定位，改善多屏、不同缩放比例下的偏差。\n"
                     L"3. 优先读取实际焦点子窗口的输入状态，并兼容没有原生光标的现代桌面应用。\n"
-                    L"4. 受 Windows 权限隔离限制，如需跟踪管理员窗口，请以【管理员身份】运行。\n\n"
+                    L"4. 受 Windows 权限隔离限制，如需跟踪管理员窗口，请以【管理员身份】运行。\n"
+                    L"5. 诊断日志：%LOCALAPPDATA%\\IME Indicator\\IME_Indicator.log。\n\n"
                     L"By LC & Grok & Gemini & ChatGPT 2026.09.30", 
                     L"关于 IME Indicator", 
                     MB_OK | MB_ICONINFORMATION);
@@ -451,6 +540,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             break;
 
         case WM_DESTROY:
+            LogEvent(L"STOP");
             if (g_nid.hIcon) DestroyIcon(g_nid.hIcon);
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             PostQuitMessage(0);
@@ -462,6 +552,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 /* ---------------- 入口函数 ---------------- */
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    InitializeLog();
     EnableDeepDPI(); 
 
     const char* ICON_DATA = "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";
