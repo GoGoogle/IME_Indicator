@@ -147,16 +147,6 @@ void ConvertPointToPhysical(HWND hwnd, POINT* pt) {
     if (convert) convert(hwnd, pt);
 }
 
-void ConvertPointToLogical(HWND hwnd, POINT* pt) {
-    typedef BOOL (WINAPI *PPhysicalToLogicalPointForPerMonitorDPI)(HWND, LPPOINT);
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    PPhysicalToLogicalPointForPerMonitorDPI convert = user32
-        ? (PPhysicalToLogicalPointForPerMonitorDPI)GetProcAddress(
-              user32, "PhysicalToLogicalPointForPerMonitorDPI")
-        : NULL;
-    if (convert) convert(hwnd, pt);
-}
-
 /*
  * 原生 Win32 编辑框会提供插入点；部分现代框架不会，因此再用
  * WM_GETDLGCODE 判断当前焦点窗口是否声明接收文本/编辑键。
@@ -262,20 +252,14 @@ void Render(void) {
         GUITHREADINFO gti = { sizeof(gti) };
         if (GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gti) && gti.hwndCaret) {
             if (gti.rcCaret.bottom > gti.rcCaret.top) {
-                /*
-                 * 先取 caret 窗口的客户区原点（物理坐标），转换到目标进程的
-                 * 逻辑坐标后再加上 rcCaret，最后统一转回物理坐标。不能将
-                 * ClientToScreen 与不同 DPI 上下文的 rcCaret 直接相加。
-                 */
-                POINT cp = { 0, 0 };
+                POINT cp = { gti.rcCaret.left, gti.rcCaret.bottom };
                 ClientToScreen(gti.hwndCaret, &cp);
-                ConvertPointToLogical(gti.hwndCaret, &cp);
-                cp.x += gti.rcCaret.left +
-                        (gti.rcCaret.right - gti.rcCaret.left) / 2;
-                cp.y += gti.rcCaret.bottom;
+                // GetGUIThreadInfo 返回的坐标可能按目标进程的 DPI 虚拟化。
+                // 统一转成物理像素，避免 DPI-unaware 应用位于副屏时发生位移。
                 ConvertPointToPhysical(gti.hwndCaret, &cp);
                 if (MonitorFromPoint(cp, MONITOR_DEFAULTTONULL)) {
-                    anchor = cp;
+                    anchor.x = cp.x + (gti.rcCaret.right - gti.rcCaret.left) / 2;
+                    anchor.y = cp.y;
                     hasCaret = TRUE;
                 }
             }
@@ -288,9 +272,7 @@ void Render(void) {
      * 没有原生 caret 的现代界面（例如 Chromium/Electron）仍可能接收文本。
      * 此时以 WM_GETDLGCODE 为后备判定，避免“仅在可输入文字时显示”误隐藏。
      */
-    BOOL acceptsText = WindowAcceptsText(inputWindow) ||
-                       (fg && fg != inputWindow && WindowAcceptsText(fg));
-    if (g_onlyWhenTyping && !hasCaret && !acceptsText) {
+    if (g_onlyWhenTyping && !hasCaret && !WindowAcceptsText(inputWindow)) {
         if (IsWindowVisible(g_hwnd)) {
             ShowWindow(g_hwnd, SW_HIDE);
             InvalidateRenderCache();
@@ -436,7 +418,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             else if (LOWORD(w) == ID_ABOUT) {
                 MessageBoxW(h, 
-                    L"IME Indicator V7.3 Final\n\n"
+                    L"IME Indicator V7.2 Final\n\n"
                     L"功能特性：\n"
                     L"1. 在光标或鼠标底部用彩色小点指示输入状态。\n"
                     L"2. 状态定义：蓝底(英), 橙底(中), 绿底(大写锁定)。\n"
